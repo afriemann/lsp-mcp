@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 from pathlib import Path
 
@@ -213,3 +214,25 @@ def test_resolve_path_style_pattern() -> None:
     cfg = _make_config(("src/*.py", ["ty"]))
     assert resolve("src/app.py", cfg) != []
     assert resolve("lib/app.py", cfg) == []
+
+
+def test_load_config_xdg_config_home(tmp_path: Path, monkeypatch) -> None:
+    """XDG_CONFIG_HOME overrides the default ~/.config location."""
+    custom_dir = tmp_path / "custom_config"
+    lsp_dir = custom_dir / "lsp-mcp"
+    lsp_dir.mkdir(parents=True)
+    cfg_file = lsp_dir / "config.yml"
+    cfg_file.write_text(
+        textwrap.dedent("""
+        servers:
+          ty:
+            command: [uvx, ty, server]
+        file_handlers:
+          "*.py":
+            - server: ty
+        """),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(custom_dir))
+    cfg = load_config()  # no path arg — should discover via XDG
+    assert "ty" in cfg.servers

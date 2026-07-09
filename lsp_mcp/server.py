@@ -25,9 +25,6 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 
-_manager: ServerManager | None = None
-_dispatcher: Dispatcher | None = None
-
 
 def build_app(config_path: str | None = None) -> FastMCP:
     """

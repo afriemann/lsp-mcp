@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from .offsets import position_to_index
 from .symbols import SymbolRange
@@ -56,6 +57,13 @@ def apply_edit(
                 logger.debug("didChange notification failed for %r: %s", abs_path, exc)
 
 
+def _edit_start_key(edit: dict[str, Any]) -> tuple[int, int]:
+    """Sort key for a TextEdit: (start_line, start_character)."""
+    r = edit.get("range", {})
+    s = r.get("start", {})
+    return (s.get("line", 0), s.get("character", 0))
+
+
 def apply_workspace_edit(
     workspace_edit: dict[str, Any],
     servers: list[Any],
@@ -92,12 +100,7 @@ def apply_workspace_edit(
             continue
 
         # Sort edits bottom-up by start offset (descending)
-        def _sort_key(edit: dict[str, Any]) -> tuple[int, int]:
-            r = edit.get("range", {})
-            s = r.get("start", {})
-            return (s.get("line", 0), s.get("character", 0))
-
-        sorted_edits = sorted(edits, key=_sort_key, reverse=True)
+        sorted_edits = sorted(edits, key=_edit_start_key, reverse=True)
         for edit in sorted_edits:
             r = edit.get("range", {})
             sr = r.get("start", {})
@@ -135,8 +138,7 @@ def apply_workspace_edit(
 
 
 def _uri_to_path(uri: str) -> str:
-    return (
-        pathlib.Path(uri.replace("file://", "")).as_posix()
-        if uri.startswith("file://")
-        else uri
-    )
+    """Convert a ``file://`` URI to an absolute path, decoding percent-encoding."""
+    if uri.startswith("file://"):
+        return str(pathlib.Path(unquote(urlparse(uri).path)))
+    return uri

@@ -7,6 +7,7 @@ import logging
 import os
 import pathlib
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from ..config.model import Config, ServerSpec
 from ..config.resolver import resolve
@@ -192,6 +193,11 @@ class Dispatcher:
                 pos = await _resolve_symbol_position(server, rel, symbol)
                 if pos is None:
                     continue
+                if isinstance(pos, list):
+                    return DeclarationResult(
+                        note=f"Ambiguous symbol '{symbol}': {', '.join(pos)}",
+                        warnings=warnings,
+                    )
                 raw = await server.request_definition(rel, pos[0], pos[1])
                 if raw:
                     return DeclarationResult(
@@ -228,6 +234,11 @@ class Dispatcher:
                 pos = await _resolve_symbol_position(server, rel, symbol)
                 if pos is None:
                     continue
+                if isinstance(pos, list):
+                    return ImplementationsResult(
+                        note=f"Ambiguous symbol '{symbol}': {', '.join(pos)}",
+                        warnings=warnings,
+                    )
                 raw = await server.raw_request(
                     "textDocument/implementation",
                     {
@@ -268,6 +279,11 @@ class Dispatcher:
                 pos = await _resolve_symbol_position(server, rel, symbol)
                 if pos is None:
                     continue
+                if isinstance(pos, list):
+                    return ReferencingSymbolsResult(
+                        note=f"Ambiguous symbol '{symbol}': {', '.join(pos)}",
+                        warnings=warnings,
+                    )
                 raw = await server.request_references(rel, pos[0], pos[1])
                 if raw:
                     return ReferencingSymbolsResult(
@@ -347,6 +363,11 @@ class Dispatcher:
                 pos = await _resolve_symbol_position(server, rel, symbol)
                 if pos is None:
                     continue
+                if isinstance(pos, list):
+                    return RenameSymbolResult(
+                        note=f"Ambiguous symbol '{symbol}': {', '.join(pos)}",
+                        warnings=warnings,
+                    )
                 workspace_edit = await server.raw_request(
                     "textDocument/rename",
                     {
@@ -457,17 +478,23 @@ def _no_cap_note(file_path: str, capability: str) -> str:
 
 async def _resolve_symbol_position(
     server: GenericLanguageServer, rel_path: str, symbol: str
-) -> tuple[int, int] | None:
+) -> tuple[int, int] | list[str] | None:
     """
     Resolve *symbol* to an (line, char) position using document symbols.
-    Returns None if not found.
+
+    Returns:
+    - ``(line, char)`` on unambiguous match.
+    - ``list[str]`` of candidate descriptions when the bare name is ambiguous.
+    - ``None`` if not found or on error.
     """
     try:
         raw, _ = await server.request_document_symbols(rel_path)
         matches = resolve_symbol(symbol, [_unifiedsym_to_dict(s) for s in raw])
         if not matches:
             return None
-        # Use the selectionRange.start of the first match
+        if len(matches) > 1:
+            # Spec: return candidates rather than guessing
+            return [f"{m.name} (line {m.selection_range.start_line})" for m in matches]
         m = matches[0]
         return m.selection_range.start_line, m.selection_range.start_char
     except Exception:
@@ -527,7 +554,11 @@ def _parse_locations(raw: Any, repo_root: str) -> list[Location]:
         s = r.get("start", {})
         e = r.get("end", {})
         try:
-            abs_path = pathlib.Path(uri.replace("file://", "")).as_posix()
+            abs_path = (
+                str(pathlib.Path(unquote(urlparse(uri).path)))
+                if uri.startswith("file://")
+                else uri
+            )
         except Exception:
             abs_path = uri
         locs.append(

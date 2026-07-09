@@ -74,7 +74,10 @@ class GenericLanguageServer(LanguageServer):
             raise ValueError("command must not be empty")
 
         _logger = logger or MultilspyLogger()
-        # cmd is passed to create_subprocess_shell; shlex.join preserves args.
+        # multilspy's ProcessLaunchInfo.cmd is a string passed to
+        # create_subprocess_shell.  We mitigate injection risk with shlex.join,
+        # but shell variable expansion and aliases remain active.  See STYLE.md
+        # "Known multilspy limitation: shell-based process launch".
         cmd_str = shlex.join(command)
         config = MultilspyConfig(code_language="python")  # value unused in generic path
         super().__init__(
@@ -108,7 +111,13 @@ class GenericLanguageServer(LanguageServer):
 
     @asynccontextmanager
     async def start_server(self) -> AsyncIterator["GenericLanguageServer"]:
-        """Start the language server process and complete the initialize handshake."""
+        """Start the language server process and complete the initialize handshake.
+
+        Implementation note: ``LanguageServer.start_server()`` (the multilspy base)
+        only sets the ``server_started`` flag — it does NOT call
+        ``self.server.start()`` or send ``initialize``.  Those are the
+        responsibility of each concrete subclass, exactly as done here.
+        """
 
         async def _on_publish_diagnostics(params: dict[str, Any]) -> None:
             uri = params.get("uri", "")

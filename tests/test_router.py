@@ -418,3 +418,178 @@ async def test_partial_failure_warnings(tmp_path: Path) -> None:
     result = await dispatcher.find_declaration("foo", str(f))
     assert len(result.locations) == 1
     assert any("s1" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Tests: get_symbols_overview — fallthrough on empty first server
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_symbols_overview_fallthrough_to_second(tmp_path: Path) -> None:
+    """When first server returns empty symbols, second server's result is used."""
+    f = tmp_path / "app.py"
+    f.touch()
+
+    raw_syms = [
+        {
+            "name": "Bar",
+            "kind": 5,
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 3, "character": 0},
+            },
+            "selectionRange": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 3},
+            },
+            "children": [],
+        }
+    ]
+    server1 = _make_server(
+        str(tmp_path), {"documentSymbolProvider": True}, doc_symbols=[]
+    )
+    server2 = _make_server(
+        str(tmp_path), {"documentSymbolProvider": True}, doc_symbols=raw_syms
+    )
+
+    config = _make_config(("*.py", ["s1", "s2"]))
+    manager = MagicMock(spec=ServerManager)
+
+    async def _acquire(spec, file_path):
+        if spec.name == "s1":
+            return _make_entry({}, server1)
+        return _make_entry({}, server2)
+
+    manager.acquire = _acquire
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.get_symbols_overview(str(f))
+    assert len(result.symbols) == 1
+    assert result.symbols[0].name == "Bar"
+    # Both servers were queried (empty is not a win)
+    server1.request_document_symbols.assert_called_once()
+    server2.request_document_symbols.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: replace_symbol_body — symbol not found
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_replace_symbol_body_symbol_not_found(tmp_path: Path) -> None:
+    """replace_symbol_body returns error when symbol is not in the file."""
+    f = tmp_path / "app.py"
+    f.write_text("def foo(): pass\n")
+
+    server = _make_server(
+        str(tmp_path),
+        {"documentSymbolProvider": True},
+        doc_symbols=[],  # empty — no symbols
+    )
+
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.replace_symbol_body(
+        "nonexistent", "def nonexistent(): pass", str(f)
+    )
+    assert not result.success
+    assert "nonexistent" in result.note
+
+
+# ---------------------------------------------------------------------------
+# Tests: rename_symbol — no capable server
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rename_symbol_no_capable_server(tmp_path: Path) -> None:
+    """rename_symbol returns an explanatory note when no server has renameProvider."""
+    f = tmp_path / "app.py"
+    f.touch()
+
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+    server = _make_server(str(tmp_path), {})  # no renameProvider
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.rename_symbol("foo", "bar", str(f))
+    assert result.changed_files == []
+    assert result.note
+    assert "renameProvider" in result.note
+
+
+# ---------------------------------------------------------------------------
+# Tests: ambiguous symbol returns candidates note
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_declaration_ambiguous_symbol_returns_note(tmp_path: Path) -> None:
+    """When a bare name matches multiple symbols, a note with candidates is returned."""
+    f = tmp_path / "app.py"
+    f.write_text("def run(): pass\nclass Foo:\n    def run(self): pass\n")
+
+    # Two symbols named "run"
+    raw_syms = [
+        {
+            "name": "run",
+            "kind": 12,
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 15},
+            },
+            "selectionRange": {
+                "start": {"line": 0, "character": 4},
+                "end": {"line": 0, "character": 7},
+            },
+            "children": [],
+        },
+        {
+            "name": "Foo",
+            "kind": 5,
+            "range": {
+                "start": {"line": 1, "character": 0},
+                "end": {"line": 2, "character": 20},
+            },
+            "selectionRange": {
+                "start": {"line": 1, "character": 6},
+                "end": {"line": 1, "character": 9},
+            },
+            "children": [
+                {
+                    "name": "run",
+                    "kind": 6,
+                    "range": {
+                        "start": {"line": 2, "character": 4},
+                        "end": {"line": 2, "character": 20},
+                    },
+                    "selectionRange": {
+                        "start": {"line": 2, "character": 8},
+                        "end": {"line": 2, "character": 11},
+                    },
+                    "children": [],
+                }
+            ],
+        },
+    ]
+    server = _make_server(
+        str(tmp_path),
+        {"definitionProvider": True, "documentSymbolProvider": True},
+        doc_symbols=raw_syms,
+    )
+
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.find_declaration("run", str(f))
+    assert result.locations == []
+    assert "Ambiguous" in result.note
+    assert "run" in result.note

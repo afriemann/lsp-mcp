@@ -93,6 +93,11 @@ class ServerManager:
         *file_path*), starting the server if absent.
 
         Returns ``None`` when the server cannot start after one retry.
+
+        Note: crash-retry for *active requests* (i.e. a transport error raised
+        during a ``request_*`` call) is not implemented; the dispatch layer
+        treats those as tool-level warnings and falls through to the next
+        server.  Only startup failures are retried here.
         """
         root = infer_project_root(file_path)
         key: PoolKey = (spec.name, root)

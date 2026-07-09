@@ -46,3 +46,7 @@ All position-to-index conversions go through `dispatch/offsets.py:position_to_in
 ## Config immutability
 
 `Config`, `ServerSpec`, and `FileHandler` are `frozen=True` dataclasses. They are loaded once at startup and shared as read-only. Do not add mutable state to them.
+
+## Known multilspy limitation: shell-based process launch
+
+`multilspy`'s `ProcessLaunchInfo.cmd` is a string passed to `asyncio.create_subprocess_shell`. This means LSP servers are launched via the shell rather than directly via `execvp`. We mitigate injection risk with `shlex.join(command)`, but shell variable expansion and alias resolution are still active. When multilspy adds support for list-based `create_subprocess_exec` launch, this should be updated. Track the issue in `lsp_mcp/lsp/generic_server.py`.
