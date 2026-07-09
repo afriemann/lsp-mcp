@@ -23,6 +23,47 @@ def test_apply_edit_simple(tmp_path: Path) -> None:
     assert "def foo():" not in content
 
 
+def test_apply_edit_indented_input_normalized(tmp_path: Path) -> None:
+    """Input with leading indent on every line is normalized before splice."""
+    f = tmp_path / "test.py"
+    f.write_text("def foo():\n    pass\n", encoding="utf-8")
+    sym_range = SymbolRange(start_line=0, start_char=0, end_line=1, end_char=8)
+    # Caller provides text with 4 extra leading spaces on every line
+    indented = "    def bar():\n        return 1"
+    apply_edit(str(f), sym_range, indented, servers=[])
+    content = f.read_text(encoding="utf-8")
+    assert content == "def bar():\n    return 1\n"
+
+
+def test_apply_edit_nested_function_indented_input(tmp_path: Path) -> None:
+    """Nested function body is correctly placed when indented input is given."""
+    source = "def outer():\n    def inner():\n        pass\n"
+    f = tmp_path / "nested.py"
+    f.write_text(source, encoding="utf-8")
+    # inner() starts at line=1, col=4; ends at line=2, col=12
+    sym_range = SymbolRange(start_line=1, start_char=4, end_line=2, end_char=12)
+    # Caller provides replacement with the same 4-space indent as the original
+    indented = "    def inner():\n        return 42"
+    apply_edit(str(f), sym_range, indented, servers=[])
+    assert f.read_text(encoding="utf-8") == (
+        "def outer():\n    def inner():\n        return 42\n"
+    )
+
+
+def test_apply_edit_nested_function_unindented_input(tmp_path: Path) -> None:
+    """Nested function at column 0 in input is also handled correctly."""
+    source = "def outer():\n    def inner():\n        pass\n"
+    f = tmp_path / "nested2.py"
+    f.write_text(source, encoding="utf-8")
+    sym_range = SymbolRange(start_line=1, start_char=4, end_line=2, end_char=12)
+    # Caller provides replacement at column 0 (no indent)
+    unindented = "def inner():\n    return 42"
+    apply_edit(str(f), sym_range, unindented, servers=[])
+    assert f.read_text(encoding="utf-8") == (
+        "def outer():\n    def inner():\n        return 42\n"
+    )
+
+
 def test_apply_edit_multi_byte(tmp_path: Path) -> None:
     # Line 0: "🎉 = 1\n"
     # The emoji is 1 code point but 2 UTF-16 units.

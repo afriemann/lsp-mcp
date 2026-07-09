@@ -134,8 +134,12 @@ class Dispatcher:
         )
 
     async def find_symbol(self, query: str, file_path: str = "") -> FindSymbolResult:
+        if not file_path:
+            # No file context: try every configured server for workspace search.
+            return await self._find_symbol_all_servers(query)
+
         # workspace/symbol doesn't need a file; use it for routing context only
-        route_path = self._abs(file_path) if file_path else os.getcwd()
+        route_path = self._abs(file_path)
         servers, warnings = await self._acquire_servers(
             route_path, ToolKind.FIND_SYMBOL
         )
@@ -170,6 +174,42 @@ class Dispatcher:
 
         return FindSymbolResult(
             note=f"No symbols matching '{query}'", warnings=warnings
+        )
+
+    async def _find_symbol_all_servers(self, query: str) -> FindSymbolResult:
+        """Try workspace/symbol on every server in the config (no file context)."""
+        cwd = os.getcwd()
+        warnings: list[str] = []
+        for name, spec in self._config.servers.items():
+            entry = await self._manager.acquire(spec, cwd)
+            if entry is None or entry.state != "ready":
+                warnings.append(f"Server '{name}' failed to start")
+                continue
+            if not entry.server.capabilities.supports(ToolKind.FIND_SYMBOL):
+                continue
+            try:
+                raw = await entry.server.request_workspace_symbol(query)
+                if raw:
+                    symbols = [
+                        {
+                            "name": s.get("name", ""),
+                            "kind": s.get("kind", 0),
+                            "path": s.get("absolutePath")
+                            or s.get("location", {}).get("uri", ""),
+                            "line": s.get("location", {})
+                            .get("range", {})
+                            .get("start", {})
+                            .get("line", 0),
+                        }
+                        for s in (raw if isinstance(raw, list) else [])
+                    ]
+                    return FindSymbolResult(symbols=symbols, warnings=warnings)
+            except Exception as exc:
+                warnings.append(f"Server '{name}': {exc}")
+
+        return FindSymbolResult(
+            note=f"No symbols matching '{query}' across all configured servers",
+            warnings=warnings,
         )
 
     async def find_declaration(self, symbol: str, file_path: str) -> DeclarationResult:
@@ -368,14 +408,17 @@ class Dispatcher:
                         note=f"Ambiguous symbol '{symbol}': {', '.join(pos)}",
                         warnings=warnings,
                     )
-                workspace_edit = await server.raw_request(
-                    "textDocument/rename",
-                    {
-                        "textDocument": {"uri": pathlib.Path(abs_path).as_uri()},
-                        "position": {"line": pos[0], "character": pos[1]},
-                        "newName": new_name,
-                    },
-                )
+                # ty (and other servers) require the document to be open via
+                # didOpen before accepting textDocument/rename requests.
+                with server.open_file(rel):
+                    workspace_edit = await server.raw_request(
+                        "textDocument/rename",
+                        {
+                            "textDocument": {"uri": pathlib.Path(abs_path).as_uri()},
+                            "position": {"line": pos[0], "character": pos[1]},
+                            "newName": new_name,
+                        },
+                    )
                 if workspace_edit:
                     all_servers = [e2.server for _, e2 in servers if e2 is not None]
                     changed = apply_workspace_edit(workspace_edit, all_servers)
@@ -412,23 +455,28 @@ class Dispatcher:
             diags: list[dict[str, Any]] = []
 
             try:
-                if server.capabilities.supports(ToolKind.GET_DIAGNOSTICS_FOR_FILE_PULL):
-                    # Pull path: textDocument/diagnostic
-                    raw = await server.raw_request(
-                        "textDocument/diagnostic",
-                        {"textDocument": {"uri": uri}},
-                    )
-                    if isinstance(raw, dict):
-                        diags = raw.get("items", [])
-                    elif isinstance(raw, list):
-                        diags = raw
-                else:
-                    # Push path: open the file and wait for publishDiagnostics
-                    with server.open_file(rel):
+                # All diagnostic paths require the document to be open.
+                # open_file sends didOpen; the with-block keeps it open while
+                # we request or wait for diagnostics, then sends didClose.
+                with server.open_file(rel):
+                    if server.capabilities.supports(
+                        ToolKind.GET_DIAGNOSTICS_FOR_FILE_PULL
+                    ):
+                        # Pull path: textDocument/diagnostic (LSP 3.17+)
+                        raw = await server.raw_request(
+                            "textDocument/diagnostic",
+                            {"textDocument": {"uri": uri}},
+                        )
+                        if isinstance(raw, dict):
+                            diags = raw.get("items", [])
+                        elif isinstance(raw, list):
+                            diags = raw
+                    else:
+                        # Push path: wait for textDocument/publishDiagnostics
                         await server.wait_for_diagnostics(
                             uri, timeout=_DIAG_SETTLE_SECONDS
                         )
-                    diags = server.push_diagnostics.get(uri, [])
+                        diags = server.push_diagnostics.get(uri, [])
             except Exception as exc:
                 warnings.append(f"Server '{spec.name}': {exc}")
                 continue

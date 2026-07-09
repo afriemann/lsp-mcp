@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import textwrap
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -11,6 +12,34 @@ from .offsets import position_to_index
 from .symbols import SymbolRange
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_replacement(new_text: str, indent_chars: int) -> str:
+    """
+    Prepare *new_text* for splicing at a symbol whose start column is
+    *indent_chars*.
+
+    ``text[:start_idx]`` already provides the symbol's leading indentation
+    on its line, so the replacement text must start at column 0.  Body lines
+    that follow must then be re-indented by *indent_chars* spaces to preserve
+    their indentation relative to the def/class line.
+
+    Algorithm:
+    1. ``textwrap.dedent`` strips common leading whitespace from all lines so
+       the first line starts at column 0 regardless of what the caller passed.
+    2. Every line after the first gets *indent_chars* spaces prepended so the
+       body has the correct absolute indentation in the file.
+    3. Trailing newlines are stripped — ``text[end_idx:]`` already provides
+       the line separator that follows the symbol.
+    """
+    dedented = textwrap.dedent(new_text.rstrip("\n"))
+    lines = dedented.splitlines(keepends=True)
+    if len(lines) <= 1:
+        return dedented
+    prefix = " " * indent_chars
+    result = [lines[0]]
+    result.extend(prefix + line for line in lines[1:])
+    return "".join(result)
 
 
 def apply_edit(
@@ -31,6 +60,12 @@ def apply_edit(
     """
     abs_path = str(pathlib.Path(file_path).resolve())
     text = pathlib.Path(abs_path).read_text(encoding="utf-8")
+
+    # Normalise indentation: text[:start_idx] already contains the leading
+    # whitespace for this symbol's line (the symbol's indent column), so
+    # new_text must start at column 0 and body lines must be re-indented by
+    # start_char spaces to preserve their indentation within the file.
+    new_text = _normalize_replacement(new_text, sym_range.start_char)
 
     start_idx = position_to_index(text, sym_range.start_line, sym_range.start_char)
     end_idx = position_to_index(text, sym_range.end_line, sym_range.end_char)

@@ -525,6 +525,54 @@ async def test_rename_symbol_no_capable_server(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tests: find_symbol without file_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_symbol_no_file_path_tries_all_servers(tmp_path: Path) -> None:
+    """find_symbol with no file_path iterates all configured servers."""
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+
+    symbol_result = [
+        {
+            "name": "MyClass",
+            "kind": 5,
+            "location": {
+                "uri": "file:///app.py",
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 10, "character": 0},
+                },
+            },
+        }
+    ]
+    server = _make_server(str(tmp_path), {"workspaceSymbolProvider": True})
+    server.request_workspace_symbol = AsyncMock(return_value=symbol_result)
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.find_symbol("MyClass")  # no file_path
+    assert len(result.symbols) == 1
+    assert result.symbols[0]["name"] == "MyClass"
+
+
+@pytest.mark.asyncio
+async def test_find_symbol_no_file_path_no_capable_server(tmp_path: Path) -> None:
+    """find_symbol with no file_path returns note when no server has workspaceSymbolProvider."""
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+    server = _make_server(str(tmp_path), {})  # no workspaceSymbolProvider
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.find_symbol("anything")
+    assert result.symbols == []
+    assert result.note
+
+
+# ---------------------------------------------------------------------------
 # Tests: ambiguous symbol returns candidates note
 # ---------------------------------------------------------------------------
 
