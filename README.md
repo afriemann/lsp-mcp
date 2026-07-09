@@ -17,7 +17,7 @@ uvx lsp-mcp --help
 ### With `uv run`
 
 ```bash
-git clone https://github.com/you/lsp-mcp
+git clone https://github.com/AFriemann/lsp-mcp
 uv run --project /path/to/lsp-mcp lsp-mcp
 ```
 
@@ -174,7 +174,7 @@ lsp_mcp/
 ## Development
 
 ```bash
-git clone https://github.com/you/lsp-mcp
+git clone https://github.com/AFriemann/lsp-mcp
 cd lsp-mcp
 uv sync
 uv run pytest
