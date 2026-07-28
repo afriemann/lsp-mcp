@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from lsp_mcp.config.model import Config, FileHandler, ServerSpec
 from lsp_mcp.dispatch.router import Dispatcher
-from lsp_mcp.lsp.capabilities import CapabilitySet, ToolKind
+from lsp_mcp.lsp.capabilities import CapabilitySet
 from lsp_mcp.lsp.manager import ServerEntry, ServerManager
 
 
@@ -473,7 +473,185 @@ async def test_get_symbols_overview_fallthrough_to_second(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Tests: replace_symbol_body — decorator preservation
+# spec: openspec/changes/fix-decorator-preservation-and-tool-descriptions/specs/mcp-tools/spec.md
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_replace_symbol_body_replaces_undecorated_symbol(
+    tmp_path: Path,
+) -> None:
+    """Undecorated symbol: full_range == selection_range → normal replacement."""
+    f = tmp_path / "app.py"
+    f.write_text("def greet(name):\n    return name\n")
+
+    raw_syms = [
+        {
+            "name": "greet",
+            "kind": 12,
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 1, "character": 15},
+            },
+            "selectionRange": {
+                "start": {"line": 0, "character": 4},
+                "end": {"line": 0, "character": 9},
+            },
+            "children": [],
+        }
+    ]
+    server = _make_server(
+        str(tmp_path), {"documentSymbolProvider": True}, doc_symbols=raw_syms
+    )
+
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.replace_symbol_body(
+        "greet", "def greet(name):\n    return 'hello'\n", str(f)
+    )
+    assert result.success
+    content = f.read_text()
+    assert "return 'hello'" in content
+    # decorator was never there — no inadvertent insertion
+    assert "@" not in content
+
+
+@pytest.mark.asyncio
+async def test_replace_symbol_body_preserves_decorator_when_new_body_starts_with_def(
+    tmp_path: Path,
+) -> None:
+    """Decorated function: new_body starts with def → decorator line preserved."""
+    f = tmp_path / "app.py"
+    f.write_text("@my_decorator\ndef greet(name):\n    return name\n")
+
+    # LSP: full_range covers the decorator line (line 0); selection_range covers
+    # just the identifier on the def line (line 1).
+    raw_syms = [
+        {
+            "name": "greet",
+            "kind": 12,
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 2, "character": 15},
+            },
+            "selectionRange": {
+                "start": {"line": 1, "character": 4},
+                "end": {"line": 1, "character": 9},
+            },
+            "children": [],
+        }
+    ]
+    server = _make_server(
+        str(tmp_path), {"documentSymbolProvider": True}, doc_symbols=raw_syms
+    )
+
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.replace_symbol_body(
+        "greet", "def greet(name):\n    return 'hello'\n", str(f)
+    )
+    assert result.success
+    content = f.read_text()
+    assert "@my_decorator" in content, "decorator must be preserved"
+    assert "return 'hello'" in content
+
+
+@pytest.mark.asyncio
+async def test_replace_symbol_body_preserves_stacked_decorators(
+    tmp_path: Path,
+) -> None:
+    """Multiple stacked decorators are all preserved when new_body starts with def."""
+    f = tmp_path / "app.py"
+    f.write_text("@decorator_one\n@decorator_two\ndef greet(name):\n    return name\n")
+
+    raw_syms = [
+        {
+            "name": "greet",
+            "kind": 12,
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 3, "character": 15},
+            },
+            "selectionRange": {
+                "start": {"line": 2, "character": 4},
+                "end": {"line": 2, "character": 9},
+            },
+            "children": [],
+        }
+    ]
+    server = _make_server(
+        str(tmp_path), {"documentSymbolProvider": True}, doc_symbols=raw_syms
+    )
+
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.replace_symbol_body(
+        "greet", "def greet(name):\n    return 'hello'\n", str(f)
+    )
+    assert result.success
+    content = f.read_text()
+    assert "@decorator_one" in content, "first decorator must be preserved"
+    assert "@decorator_two" in content, "second decorator must be preserved"
+    assert "return 'hello'" in content
+
+
+@pytest.mark.asyncio
+async def test_replace_symbol_body_replaces_decorator_when_new_body_starts_with_at(
+    tmp_path: Path,
+) -> None:
+    """Decorated function: new_body starts with @ → full range replaced (caller owns decorators)."""
+    f = tmp_path / "app.py"
+    f.write_text("@my_decorator\ndef greet(name):\n    return name\n")
+
+    raw_syms = [
+        {
+            "name": "greet",
+            "kind": 12,
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 2, "character": 15},
+            },
+            "selectionRange": {
+                "start": {"line": 1, "character": 4},
+                "end": {"line": 1, "character": 9},
+            },
+            "children": [],
+        }
+    ]
+    server = _make_server(
+        str(tmp_path), {"documentSymbolProvider": True}, doc_symbols=raw_syms
+    )
+
+    config = _make_config(("*.py", ["s1"]))
+    manager = MagicMock(spec=ServerManager)
+    manager.acquire = AsyncMock(return_value=_make_entry({}, server))
+
+    dispatcher = Dispatcher(config=config, manager=manager)
+    result = await dispatcher.replace_symbol_body(
+        "greet",
+        "@new_decorator\ndef greet(name):\n    return 'replaced'\n",
+        str(f),
+    )
+    assert result.success
+    content = f.read_text()
+    assert "@my_decorator" not in content, "old decorator must be replaced"
+    assert "@new_decorator" in content
+    assert "return 'replaced'" in content
+
+
+# ---------------------------------------------------------------------------
 # Tests: replace_symbol_body — symbol not found
+# spec: openspec/changes/fix-decorator-preservation-and-tool-descriptions/specs/mcp-tools/spec.md
 # ---------------------------------------------------------------------------
 
 

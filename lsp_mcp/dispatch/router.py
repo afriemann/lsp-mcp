@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import pathlib
@@ -28,7 +27,7 @@ from ..types import (
     SymbolsOverviewResult,
 )
 from .edits import apply_edit, apply_workspace_edit
-from .symbols import ResolvedSymbol, SymbolRange, resolve_symbol
+from .symbols import SymbolRange, resolve_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +240,7 @@ class Dispatcher:
                 raw = await server.request_definition(rel, pos[0], pos[1])
                 if raw:
                     return DeclarationResult(
-                        locations=[self._loc_from_multilspy(dict(l)) for l in raw],
+                        locations=[self._loc_from_multilspy(dict(loc)) for loc in raw],
                         warnings=warnings,
                     )
             except Exception as exc:
@@ -327,7 +326,7 @@ class Dispatcher:
                 raw = await server.request_references(rel, pos[0], pos[1])
                 if raw:
                     return ReferencingSymbolsResult(
-                        locations=[self._loc_from_multilspy(dict(l)) for l in raw],
+                        locations=[self._loc_from_multilspy(dict(loc)) for loc in raw],
                         warnings=warnings,
                     )
             except Exception as exc:
@@ -371,7 +370,34 @@ class Dispatcher:
                     )
                 sym = matches[0]
                 all_servers = [e2.server for _, e2 in servers if e2 is not None]
-                apply_edit(abs_path, sym.full_range, new_body, all_servers)
+                # Preserve decorators: if the symbol has leading decorator lines
+                # (full_range starts before selection_range) and the caller has
+                # NOT supplied their own decorators (new_body does not begin with
+                # "@"), start the edit at selection_range.start_line so the
+                # existing decorator lines are left untouched.
+                #
+                # lstrip() guards against callers supplying leading whitespace
+                # before "@"; _normalize_replacement handles indentation later.
+                #
+                # We use full_range.start_char (not selection_range.start_char)
+                # because start_char is the *indentation column* for the whole
+                # symbol block (both decorator and def share the same indent).
+                # selection_range.start_char points to the identifier name *within*
+                # the def line (e.g. column 4 for "def greet"), which is wrong as
+                # an edit-start column.
+                if (
+                    sym.full_range.start_line < sym.selection_range.start_line
+                    and not new_body.lstrip().startswith("@")
+                ):
+                    edit_range = SymbolRange(
+                        start_line=sym.selection_range.start_line,
+                        start_char=sym.full_range.start_char,
+                        end_line=sym.full_range.end_line,
+                        end_char=sym.full_range.end_char,
+                    )
+                else:
+                    edit_range = sym.full_range
+                apply_edit(abs_path, edit_range, new_body, all_servers)
                 return ReplaceSymbolBodyResult(success=True, warnings=warnings)
             except Exception as exc:
                 warnings.append(f"Server '{spec.name}': {exc}")
