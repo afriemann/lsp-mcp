@@ -7,7 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .config import load_config
 from .dispatch.router import Dispatcher
@@ -16,9 +16,9 @@ from .lsp.manager import ServerManager
 logger = logging.getLogger(__name__)
 
 
-def build_app(config_path: str | None = None) -> FastMCP:
+def build_app(config_path: str | None = None) -> MCPServer:
     """
-    Create the FastMCP application with all eight tools registered.
+    Create the MCPServer application with all eight tools registered.
 
     *config_path* overrides the default ``~/.config/lsp-mcp/config.yml``.
 
@@ -32,14 +32,14 @@ def build_app(config_path: str | None = None) -> FastMCP:
     dispatcher = Dispatcher(config=cfg, manager=manager)
 
     @asynccontextmanager
-    async def lifespan(app: FastMCP):  # type: ignore[type-arg]
+    async def lifespan(app: MCPServer):  # type: ignore[type-arg]
         manager.start_eviction_loop()
         try:
             yield {}
         finally:
             await manager.aclose()
 
-    mcp: FastMCP = FastMCP("lsp-mcp", lifespan=lifespan)
+    mcp: MCPServer = MCPServer("lsp-mcp", lifespan=lifespan)
 
     # ------------------------------------------------------------------
     # Tool adapters — thin wrappers that delegate to the Dispatcher.
