@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Keep GitHub Actions pinned to current SHAs automatically.
+  # Python/uv dependencies are deliberately excluded: GitHub's automatic
+  # Dependabot security updates are already active for this repo, so adding
+  # an explicit uv block would produce duplicate dependency PRs.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
