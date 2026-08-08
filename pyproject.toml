@@ -7,7 +7,7 @@ requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 dependencies = [
     "multilspy>=0.0.15",
-    "mcp>=1.0.0",
+    "mcp>=2.0.0",
     "pyyaml>=6.0",
 ]
 
