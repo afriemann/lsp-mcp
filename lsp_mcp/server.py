@@ -51,8 +51,11 @@ def build_app(config_path: str | None = None) -> FastMCP:
             "classes, functions, methods, and variables in one call — faster and more "
             "precise than grep for discovering what a file contains. "
             "file_path must be an absolute filesystem path. "
-            "Returns a tree of SymbolNode objects with name, kind (5=Class, 6=Method, "
-            "12=Function, 13=Variable), range, detail, and children (nested symbols); "
+            "Returns a tree of SymbolNode objects with name, kind (LSP SymbolKind integer — "
+            "5=Class, 6=Method, 12=Function, 13=Variable, etc.), "
+            "range_start_line/char, range_end_line/char (full body), "
+            "selection_start_line/char, selection_end_line/char (identifier), "
+            "detail, and children (nested symbols); "
             "check the note field first — a non-empty note means no capable server was "
             "found for this file type and the symbols list will be empty."
         )
@@ -129,7 +132,7 @@ def build_app(config_path: str | None = None) -> FastMCP:
         description=(
             "Use before renaming or deleting a symbol to see every call-site and usage "
             "across the workspace — more exhaustive than grep because the language server "
-            "resolves imports, aliased names, and dynamic dispatch. "
+            "resolves imports and aliased names that text search would miss. "
             "symbol is a name or slash-separated name-path for nested symbols; "
             "file_path must be an absolute path to the file containing the symbol. "
             "Returns Location objects (path, line, character — all 0-based) for every "
@@ -148,7 +151,7 @@ def build_app(config_path: str | None = None) -> FastMCP:
     @mcp.tool(
         description=(
             "Use to replace a function, method, or class body without touching "
-            "surrounding code or decorators — safer and more precise than rewriting the "
+            "surrounding code — safer and more precise than rewriting the "
             "entire file. "
             "symbol is a name or slash-separated name-path (e.g. 'MyClass/my_method'); "
             "file_path must be an absolute path; new_body must include the full signature "
@@ -179,7 +182,8 @@ def build_app(config_path: str | None = None) -> FastMCP:
             "Use instead of find-and-replace when renaming a symbol: the language server "
             "updates every reference across all workspace files atomically, including "
             "imports and aliased usages that text search would miss. "
-            "symbol is a name or slash-separated name-path; file_path must be an absolute "
+            "symbol is a name or slash-separated name-path for nested symbols; "
+            "file_path must be an absolute "
             "path to the file containing the symbol. "
             "Returns a list of changed file paths; check the note field first — a "
             "non-empty note means the rename is not supported, the symbol was not found, "
@@ -205,7 +209,7 @@ def build_app(config_path: str | None = None) -> FastMCP:
             "de-duplicated across all configured servers and include source_server, path, "
             "line, character, end_line, end_character (all 0-based), severity "
             "(1=Error 2=Warning 3=Info 4=Hint), message, and optional code. "
-            "Check the note field first — a non-empty note means no configured server "
+            "check the note field first — a non-empty note means no configured server "
             "provided diagnostics for this file type."
         )
     )
