@@ -67,7 +67,7 @@ def build_app(config_path: str | None = None) -> MCPServer:
 
     @mcp.tool(
         description=(
-            "Use to locate a symbol by name across the whole workspace without grepping: "
+            "Use when locating a symbol by name across the whole workspace without grepping: "
             "returns exact file, line, and kind for every match the language server indexes. "
             "file_path, when provided, is routing context only — it selects the language "
             "server by file extension; the search scope is always workspace-wide regardless; "
@@ -160,8 +160,9 @@ def build_app(config_path: str | None = None) -> MCPServer:
             "preserved automatically; if new_body starts with '@', the full symbol range "
             "(including all decorators) is replaced — call get_symbols_overview first to "
             "read current decorators before supplying '@'-prefixed new_body. "
-            "Returns success=True; check the note field first — a non-empty note means "
-            "the symbol was not found or the name was ambiguous."
+            "Returns a result with success: true on completion; check the note field "
+            "first — a non-empty note means the symbol was not found or the name was "
+            "ambiguous."
         )
     )
     async def replace_symbol_body(
@@ -183,8 +184,7 @@ def build_app(config_path: str | None = None) -> MCPServer:
             "updates every reference across all workspace files atomically, including "
             "imports and aliased usages that text search would miss. "
             "symbol is a name or slash-separated name-path for nested symbols; "
-            "file_path must be an absolute "
-            "path to the file containing the symbol. "
+            "file_path must be an absolute path to the file containing the symbol. "
             "Returns a list of changed file paths; check the note field first — a "
             "non-empty note means the rename is not supported, the symbol was not found, "
             "or the language server declined."
