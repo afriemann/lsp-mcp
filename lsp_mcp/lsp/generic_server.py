@@ -58,6 +58,27 @@ _CLIENT_CAPABILITIES: dict[str, Any] = {
 }
 
 
+_LANGUAGE_IDS: dict[str, str] = {
+    ".py": "python", ".pyi": "python", ".pyw": "python",
+    ".ts": "typescript", ".mts": "typescript", ".cts": "typescript",
+    ".tsx": "typescriptreact",
+    ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".jsx": "javascriptreact",
+    ".go": "go", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".hpp": "cpp",
+    ".html": "html", ".htm": "html", ".css": "css", ".json": "json",
+    ".rs": "rust", ".java": "java", ".rb": "ruby", ".sh": "shellscript",
+}  # fmt: skip
+
+
+def language_id_for(path: str) -> str:
+    """LSP ``languageId`` for *path* by extension; ``plaintext`` if unknown.
+
+    Servers such as ty ignore documents opened with the wrong languageId and
+    answer every request as if the file were empty/clean.
+    """
+    return _LANGUAGE_IDS.get(pathlib.PurePath(path).suffix.lower(), "plaintext")
+
+
 class GenericLanguageServer(LanguageServer):
     """
     A ``LanguageServer`` subclass that launches an arbitrary command from
@@ -143,13 +164,14 @@ class GenericLanguageServer(LanguageServer):
                 self.logger,
                 str(PurePath(self.repository_root_path, relative_file_path)),
             )
-            buf = LSPFileBuffer(uri, contents, 0, self.language_id, 1)
+            lang = language_id_for(relative_file_path)
+            buf = LSPFileBuffer(uri, contents, 0, lang, 1)
             self.open_file_buffers[uri] = buf
             self.server.notify.did_open_text_document(
                 {
                     LSPConstants.TEXT_DOCUMENT: {
                         LSPConstants.URI: uri,
-                        LSPConstants.LANGUAGE_ID: self.language_id,
+                        LSPConstants.LANGUAGE_ID: lang,
                         LSPConstants.VERSION: 0,
                         LSPConstants.TEXT: contents,
                     }

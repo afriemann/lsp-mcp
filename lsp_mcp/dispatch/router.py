@@ -988,10 +988,15 @@ class Dispatcher:
                                     {"textDocument": {"uri": uri}},
                                 ),
                             )
-                            if isinstance(raw, dict):
-                                diags = raw.get("items", [])
-                            elif isinstance(raw, list):
-                                diags = raw
+                            items = _pull_items(raw)
+                            if items is None:
+                                ctx.hint(
+                                    f"Server '{spec.name}' returned an unusable "
+                                    f"diagnostics report ({_describe_report(raw)}) — "
+                                    "the result is unknown, not clean."
+                                )
+                            else:
+                                diags = items
                         else:
                             # Push path: wait for textDocument/publishDiagnostics
                             await server.wait_for_diagnostics(
@@ -1096,6 +1101,28 @@ def _maybe_open(server: GenericLanguageServer, rel: str):
         return
     with server.open_file(rel):
         yield
+
+
+def _pull_items(raw: Any) -> list[dict[str, Any]] | None:
+    """Diagnostics from a pull response, or None when it carries no usable answer.
+
+    Only a ``full`` report with an ``items`` list (or a bare list) is an answer;
+    ``unchanged`` (we never send a previousResultId), a missing/invalid ``items``
+    or anything else must not be read as "clean".
+    """
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict) and raw.get("kind", "full") == "full":
+        items = raw.get("items")
+        if isinstance(items, list):
+            return items
+    return None
+
+
+def _describe_report(raw: Any) -> str:
+    if isinstance(raw, dict):
+        return f"kind={raw.get('kind')!r}, keys={sorted(raw)}"
+    return type(raw).__name__
 
 
 def _position_from_symbols(
