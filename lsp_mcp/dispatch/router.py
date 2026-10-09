@@ -45,6 +45,7 @@ T = TypeVar("T")
 
 # How long to wait for pushed diagnostics to settle
 _DIAG_SETTLE_SECONDS: float = 2.0
+DEFAULT_DIAG_QUIET_PERIOD: float = 0.3
 
 DEFAULT_REQUEST_TIMEOUT: float = 15.0
 DEFAULT_CALL_DEADLINE: float = 30.0
@@ -190,7 +191,11 @@ class Dispatcher:
         retries: int = DEFAULT_RETRIES,
         retry_backoff: float = DEFAULT_RETRY_BACKOFF,
         call_deadline: float = DEFAULT_CALL_DEADLINE,
+        diag_quiet_period: float = DEFAULT_DIAG_QUIET_PERIOD,
+        diag_settle_timeout: float = _DIAG_SETTLE_SECONDS,
     ) -> None:
+        self._diag_quiet_period = diag_quiet_period
+        self._diag_settle_timeout = diag_settle_timeout
         self._call_deadline = call_deadline
         self._config = config
         self._manager = manager
@@ -970,7 +975,7 @@ class Dispatcher:
                     # All diagnostic paths require the document to be open.
                     # open_file sends didOpen; the with-block keeps it open while
                     # we request or wait for diagnostics, then sends didClose.
-                    with server.open_file(rel):
+                    with _diag_session(server, rel, uri):
                         if server.capabilities.supports(
                             ToolKind.GET_DIAGNOSTICS_FOR_FILE_PULL
                         ):
@@ -990,14 +995,16 @@ class Dispatcher:
                         else:
                             # Push path: wait for textDocument/publishDiagnostics
                             await server.wait_for_diagnostics(
-                                uri, timeout=_DIAG_SETTLE_SECONDS
+                                uri,
+                                timeout=self._diag_settle_timeout,
+                                quiet_period=self._diag_quiet_period,
                             )
                             if uri in server.push_diagnostics:
                                 diags = server.push_diagnostics[uri]
                             else:
                                 ctx.hint(
                                     f"Server '{spec.name}' published no diagnostics "
-                                    f"within {_DIAG_SETTLE_SECONDS:g}s — the result is "
+                                    f"within {self._diag_settle_timeout:g}s — the result is "
                                     "unknown, not clean."
                                 )
             except LspRequestError as exc:
@@ -1056,6 +1063,29 @@ def _no_cap_note(file_path: str, capability: str) -> str:
         f"No server configured for {ext!r} files advertises '{capability}'. "
         f"Add a server with this capability to file_handlers in your config."
     )
+
+
+@contextlib.contextmanager
+def _diag_session(server: GenericLanguageServer, rel: str, uri: str):
+    """
+    Open *rel* for a diagnostics request and arm a clean diagnostics slot.
+
+    If this call performs the ``didOpen``, the reset runs right after it and
+    before any ``await``, so only publishes that arrive after this call's open
+    are accepted, and per-URI state is dropped on exit whatever happens (error,
+    cancellation, call deadline).  If the document was already open (an outer
+    open — no ``didOpen`` is sent, so no fresh publish is coming) the cache is
+    left alone: it is current, and it belongs to the outer holder.
+    """
+    already_open = uri in server.open_file_buffers
+    try:
+        with server.open_file(rel):
+            if not already_open:
+                server.reset_diagnostics(uri)
+            yield
+    finally:
+        if not already_open:
+            server.forget_diagnostics(uri)
 
 
 @contextlib.contextmanager

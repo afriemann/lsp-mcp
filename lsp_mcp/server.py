@@ -13,6 +13,7 @@ from mcp.server.mcpserver import MCPServer
 from .config import load_config
 from .dispatch.router import (
     DEFAULT_CALL_DEADLINE,
+    DEFAULT_DIAG_QUIET_PERIOD,
     DEFAULT_REQUEST_TIMEOUT,
     Dispatcher,
 )
@@ -54,6 +55,7 @@ def build_app(
     request_timeout: float | None = None,
     start_timeout: float | None = None,
     call_deadline: float | None = None,
+    diag_quiet_period: float | None = None,
 ) -> MCPServer:
     """
     Create the MCPServer application with all ten tools registered.
@@ -63,7 +65,9 @@ def build_app(
     each LSP request; *start_timeout* (default 30; env ``LSP_MCP_START_TIMEOUT``)
     bounds server start + initialize; *call_deadline* (default 30; env
     ``LSP_MCP_CALL_DEADLINE``) bounds a whole tool call (lock wait + requests +
-    retries, excluding server start).
+    retries, excluding server start); *diag_quiet_period* (default 0.3; env
+    ``LSP_MCP_DIAGNOSTICS_QUIET_PERIOD``) is how long push diagnostics must stay
+    quiet before the last publish is taken as final.
 
     The ``ServerManager`` and ``Dispatcher`` are created at build time;
     LSP servers are started lazily on the first relevant tool call.
@@ -74,12 +78,14 @@ def build_app(
     req_t = request_timeout or _env_float("LSP_MCP_REQUEST_TIMEOUT")
     start_t = start_timeout or _env_float("LSP_MCP_START_TIMEOUT")
     deadline = call_deadline or _env_float("LSP_MCP_CALL_DEADLINE")
+    quiet = diag_quiet_period or _env_float("LSP_MCP_DIAGNOSTICS_QUIET_PERIOD")
     manager = ServerManager(start_timeout=start_t or DEFAULT_START_TIMEOUT)
     dispatcher = Dispatcher(
         config=cfg,
         manager=manager,
         request_timeout=req_t or DEFAULT_REQUEST_TIMEOUT,
         call_deadline=deadline or DEFAULT_CALL_DEADLINE,
+        diag_quiet_period=quiet or DEFAULT_DIAG_QUIET_PERIOD,
     )
 
     @asynccontextmanager

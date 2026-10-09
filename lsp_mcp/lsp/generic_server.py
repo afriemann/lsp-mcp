@@ -7,10 +7,14 @@ import logging
 import os
 import pathlib
 import shlex
-from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from contextlib import asynccontextmanager, contextmanager
+from pathlib import PurePath
+from typing import Any, AsyncIterator, Iterator
 
-from multilspy.language_server import LanguageServer
+from multilspy.language_server import LanguageServer, LSPFileBuffer
+from multilspy.lsp_protocol_handler.lsp_constants import LSPConstants
+from multilspy.multilspy_exceptions import MultilspyException
+from multilspy.multilspy_utils import FileUtils
 from multilspy.lsp_protocol_handler.server import ProcessLaunchInfo
 from multilspy.multilspy_config import MultilspyConfig
 from multilspy.multilspy_logger import MultilspyLogger
@@ -111,6 +115,58 @@ class GenericLanguageServer(LanguageServer):
     def push_diagnostics(self) -> dict[str, list[dict[str, Any]]]:
         return self._push_diagnostics
 
+    def document_uri(self, relative_file_path: str) -> str:
+        """The URI under which *relative_file_path* is (or would be) opened."""
+        return pathlib.Path(
+            str(PurePath(self.repository_root_path, relative_file_path))
+        ).as_uri()
+
+    @contextmanager
+    def open_file(self, relative_file_path: str) -> Iterator[None]:
+        """
+        Open a document for the duration of the block (ref-counted).
+
+        Same behaviour as multilspy's ``open_file`` — ``didOpen`` on the first
+        reference, ``didClose`` when the last one is released — except the
+        release happens in a ``finally``: multilspy's version leaves the buffer
+        open (and never sends ``didClose``) when the block raises or is
+        cancelled, which poisons every later call on that file.
+        """
+        if not self.server_started:
+            raise MultilspyException("Language Server not started")
+        uri = self.document_uri(relative_file_path)
+        buf = self.open_file_buffers.get(uri)
+        if buf is not None:
+            buf.ref_count += 1
+        else:
+            contents = FileUtils.read_file(
+                self.logger,
+                str(PurePath(self.repository_root_path, relative_file_path)),
+            )
+            buf = LSPFileBuffer(uri, contents, 0, self.language_id, 1)
+            self.open_file_buffers[uri] = buf
+            self.server.notify.did_open_text_document(
+                {
+                    LSPConstants.TEXT_DOCUMENT: {
+                        LSPConstants.URI: uri,
+                        LSPConstants.LANGUAGE_ID: self.language_id,
+                        LSPConstants.VERSION: 0,
+                        LSPConstants.TEXT: contents,
+                    }
+                }
+            )
+        try:
+            yield
+        finally:
+            buf.ref_count -= 1
+            if buf.ref_count <= 0:
+                try:
+                    self.server.notify.did_close_text_document(
+                        {LSPConstants.TEXT_DOCUMENT: {LSPConstants.URI: uri}}
+                    )
+                finally:
+                    self.open_file_buffers.pop(uri, None)
+
     async def raw_request(
         self, method: str, params: dict[str, Any] | None = None
     ) -> Any:
@@ -129,8 +185,18 @@ class GenericLanguageServer(LanguageServer):
 
         async def _on_publish_diagnostics(params: dict[str, Any]) -> None:
             uri = params.get("uri", "")
-            diags = params.get("diagnostics", [])
-            self._push_diagnostics[uri] = diags
+            # Only accept publishes for a document that is open right now: this
+            # drops e.g. the (usually empty) publish a server sends in reaction
+            # to our didClose of the previous call.
+            buf = self.open_file_buffers.get(uri)
+            if buf is None:
+                return
+            # A publish stamped with a document version other than the one we
+            # last sent (didOpen / didChange) describes a different text.
+            version = params.get("version")
+            if version is not None and version != buf.version:
+                return
+            self._push_diagnostics[uri] = params.get("diagnostics", [])
             event = self._diag_event.get(uri)
             if event is not None:
                 event.set()
@@ -200,18 +266,56 @@ class GenericLanguageServer(LanguageServer):
         self.server.notify.initialized({})
         self.completions_available.set()
 
-    async def wait_for_diagnostics(self, uri: str, timeout: float = 2.0) -> bool:
+    def reset_diagnostics(self, uri: str) -> None:
         """
-        Wait up to *timeout* seconds for pushed diagnostics for *uri*.
-        Returns immediately if diagnostics have already arrived.
-        Returns True if diagnostics for *uri* were published, False on timeout.
+        Forget everything published for *uri* and arm a fresh event.
+
+        Call this right after ``didOpen`` (before the first ``await``, so no
+        publish can have been processed yet): only publishes arriving after the
+        open will then be accepted by ``wait_for_diagnostics``.
         """
-        if uri not in self._diag_event:
-            self._diag_event[uri] = asyncio.Event()
+        self._push_diagnostics.pop(uri, None)
+        self._diag_event[uri] = asyncio.Event()
+
+    def forget_diagnostics(self, uri: str) -> None:
+        """Drop all per-URI diagnostics state (call when the document is closed)."""
+        self._push_diagnostics.pop(uri, None)
+        self._diag_event.pop(uri, None)
+
+    async def wait_for_diagnostics(
+        self, uri: str, timeout: float = 2.0, quiet_period: float = 0.3
+    ) -> bool:
+        """
+        Wait for pushed diagnostics for *uri* published after ``reset_diagnostics``.
+
+        Waits up to *timeout* seconds for the first publish, then keeps waiting
+        until no further publish arrives for *quiet_period* seconds (servers often
+        send syntax diagnostics first and semantic ones later); the last publish
+        is what ``push_diagnostics[uri]`` then holds.  The whole wait never
+        exceeds *timeout*.  Returns True if a publish was received.
+        """
         if uri in self._push_diagnostics:
+            # Not preceded by reset_diagnostics: the document was already open
+            # (nested open), so what is cached is current — no new publish is
+            # coming because nothing was re-opened.
             return True
+        event = self._diag_event.get(uri)
+        if event is None:
+            event = self._diag_event[uri] = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         try:
-            await asyncio.wait_for(self._diag_event[uri].wait(), timeout=timeout)
+            await asyncio.wait_for(event.wait(), timeout=timeout)
         except TimeoutError:
             return False
-        return True
+        while True:
+            event.clear()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return True
+            try:
+                await asyncio.wait_for(
+                    event.wait(), timeout=min(quiet_period, remaining)
+                )
+            except TimeoutError:
+                return True

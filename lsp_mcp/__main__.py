@@ -49,6 +49,14 @@ def main() -> None:
         "(default 30; env LSP_MCP_CALL_DEADLINE)",
     )
     parser.add_argument(
+        "--diagnostics-quiet-period",
+        type=_positive_seconds,
+        metavar="SECONDS",
+        help="After the first pushed diagnostics, wait this long for further "
+        "publishes and use the last one (default 0.3; "
+        "env LSP_MCP_DIAGNOSTICS_QUIET_PERIOD)",
+    )
+    parser.add_argument(
         "--log-level",
         default="WARNING",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -69,6 +77,7 @@ def main() -> None:
         request_timeout=args.request_timeout,
         start_timeout=args.start_timeout,
         call_deadline=args.call_deadline,
+        diag_quiet_period=args.diagnostics_quiet_period,
     )
     app.run(transport="stdio")
 

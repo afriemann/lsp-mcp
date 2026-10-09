@@ -111,12 +111,14 @@ async def test_push_diagnostics_stored_per_uri(tmp_path):
             push_cb = registered_callbacks.get("textDocument/publishDiagnostics")
             assert push_cb is not None
 
-            uri = "file:///tmp/test.py"
+            (tmp_path / "test.py").write_text("import os\n")
+            uri = (tmp_path / "test.py").as_uri()
             diags = [{"message": "unused import", "severity": 2}]
-            await push_cb({"uri": uri, "diagnostics": diags})
+            with server.open_file("test.py"):  # publishes for closed files are ignored
+                await push_cb({"uri": uri, "diagnostics": diags})
 
-            assert uri in server.push_diagnostics
-            assert server.push_diagnostics[uri][0]["message"] == "unused import"
+                assert uri in server.push_diagnostics
+                assert server.push_diagnostics[uri][0]["message"] == "unused import"
 
 
 @pytest.mark.asyncio
@@ -135,11 +137,13 @@ async def test_push_diagnostics_overwrite_per_uri(tmp_path):
         )
         async with server.start_server():
             cb = registered["textDocument/publishDiagnostics"]
-            uri = "file:///tmp/a.py"
-            await cb({"uri": uri, "diagnostics": [{"message": "first"}]})
-            await cb({"uri": uri, "diagnostics": [{"message": "second"}]})
-            assert len(server.push_diagnostics[uri]) == 1
-            assert server.push_diagnostics[uri][0]["message"] == "second"
+            (tmp_path / "a.py").write_text("x\n")
+            uri = (tmp_path / "a.py").as_uri()
+            with server.open_file("a.py"):
+                await cb({"uri": uri, "diagnostics": [{"message": "first"}]})
+                await cb({"uri": uri, "diagnostics": [{"message": "second"}]})
+                assert len(server.push_diagnostics[uri]) == 1
+                assert server.push_diagnostics[uri][0]["message"] == "second"
 
 
 @pytest.mark.asyncio
