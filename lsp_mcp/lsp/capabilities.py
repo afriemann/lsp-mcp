@@ -14,6 +14,8 @@ class ToolKind(Enum):
     FIND_REFERENCING_SYMBOLS = auto()
     REPLACE_SYMBOL_BODY = auto()
     RENAME_SYMBOL = auto()
+    GET_HOVER = auto()
+    GET_CALL_HIERARCHY = auto()
     GET_DIAGNOSTICS_FOR_FILE_PULL = auto()
     """Server supports pull diagnostics (textDocument/diagnostic, LSP 3.17+)."""
     GET_DIAGNOSTICS_FOR_FILE_PUSH = auto()
@@ -54,6 +56,10 @@ class CapabilitySet:
                     return False
                 # renameProvider may be True or {prepareProvider: bool}
                 return True
+            case ToolKind.GET_HOVER:
+                return bool(c.get("hoverProvider"))
+            case ToolKind.GET_CALL_HIERARCHY:
+                return bool(c.get("callHierarchyProvider"))
             case ToolKind.GET_DIAGNOSTICS_FOR_FILE_PULL:
                 return bool(c.get("diagnosticProvider"))
             case ToolKind.GET_DIAGNOSTICS_FOR_FILE_PUSH:

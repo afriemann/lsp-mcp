@@ -36,7 +36,13 @@ servers:
     command: [ruff, server]
 
   typescript-language-server:
-    command: [npx, typescript-language-server, --stdio]
+    command: [npx, --yes, typescript-language-server, --stdio]
+    # typescript-language-server needs a TypeScript *with tsserver.js* (5.x).
+    # `npx` alone fetches no TypeScript, and TypeScript 7+ ships no tsserver.js,
+    # so point it at a 5.x install (e.g. `npm i --prefix ~/.local/share/ts5 typescript@5`):
+    initialization_options:
+      tsserver:
+        path: /home/you/.local/share/ts5/node_modules/typescript/lib/tsserver.js
 
   gopls:
     command: [gopls]
@@ -64,6 +70,28 @@ file_handlers:
 - `*.ext` — matched against the **basename** only (e.g. `*.py` matches any `.py` file in any directory).
 - `src/*.py` — matched against the full path (use for path-style filtering).
 - Multiple handlers for the same pattern are concatenated in order; duplicates are removed by first occurrence.
+
+`initialization_options` (optional, per server) is sent verbatim as the LSP `initializationOptions`.
+
+> **Behaviour change:** earlier versions parsed `initialization_options` but never sent it. It now takes effect, so an existing config that already contains this key will start passing it to the server. Remove or correct it if that is not what you want.
+
+### Timeouts, deadline and retries
+
+| Setting | Default | Override |
+|---|---|---|
+| Per-request timeout (each LSP request attempt) | 15 s | `--request-timeout SECONDS` or env `LSP_MCP_REQUEST_TIMEOUT` |
+| Server start + initialize timeout | 30 s | `--start-timeout SECONDS` or env `LSP_MCP_START_TIMEOUT` |
+| Per-call deadline (whole tool call) | 30 s | `--call-deadline SECONDS` or env `LSP_MCP_CALL_DEADLINE` |
+
+Values must be positive; the CLI rejects zero, negative and non-numeric values, and invalid environment values are ignored with a warning.
+
+- **Per-call deadline:** covers waiting for the server lock, all requests and all retries of one tool call. The deadline is *paused* while a server is being started, so starting is not counted against it; each start is bounded separately by the start timeout. On expiry, **partial results are discarded** and the result's `note` names the tool and the deadline and says the result is unknown (not "no matches").
+- **Overall bound:** a call takes at most about *(time spent starting servers)* + the call deadline. Starting is bounded per server by the start timeout, a start failure that is not a timeout is retried once (up to about 2 × start timeout for that server), and a call may start several servers: one per matching handler, and `find_symbol` **without** `file_path` starts every configured server. So the worst case is roughly `N servers × (up to 2 × start timeout) + call deadline`; with typical single-server calls and warm servers it is just the deadline. A request that hits the request timeout returns a note naming the server and operation.
+- **Retries:** LSP errors `-32801` (ContentModified) and `-32800` (RequestCancelled) are retried up to 3 times (4 attempts) with exponential backoff (0.1 s, 0.2 s, 0.4 s) inside the per-call deadline. If retries are exhausted the note says the request **failed** — never an empty "no matches" result.
+- **Serialisation:** requests to one language server are serialised (per-server lock). Read tools open the document once per call; `replace_symbol_body` and `rename_symbol` hold the locks of every server they notify.
+- **Start failures:** a server that fails to start (or times out starting) is not respawned for 30 s. The `note` of every result it affects carries the server name and the error. The command line is deliberately not included (it may contain credentials); it is written to the log (`--log-level WARNING`).
+- **Empty results that are not "no":** an empty document/workspace symbol answer adds a "may still be indexing" hint to the note; a push-diagnostics server that publishes nothing within 2 s yields a note saying the result is unknown, not clean.
+- **`context_lines`** only reads files inside the project root of the queried file (symlinks resolved), at most 2 MiB per file; other locations are returned without `context`.
 
 ### Server binaries
 
@@ -101,7 +129,7 @@ Or with a local clone:
 
 ## Tools
 
-All eight tools accept absolute file paths. Symbol names may be bare (`my_func`) or name-paths (`MyClass/my_method`) for nested symbols.
+All ten tools accept absolute file paths. **All `line` / `character` values are 0-based** (LSP convention); every Location also has `line_1based` (= `line + 1`). Symbol names may be bare (`my_func`) or name-paths (`MyClass/my_method`) for nested symbols.
 
 | Tool | Description | LSP method |
 |---|---|---|
@@ -112,6 +140,8 @@ All eight tools accept absolute file paths. Symbol names may be bare (`my_func`)
 | `find_referencing_symbols` | Find all references to a symbol | `textDocument/references` |
 | `replace_symbol_body` | Replace a symbol's source text in-place | `textDocument/documentSymbol` + on-disk edit |
 | `rename_symbol` | Rename a symbol across the workspace | `textDocument/rename` |
+| `get_hover` | Type / signature / docs at a position | `textDocument/hover` |
+| `get_call_hierarchy` | Callers or callees of the function at a position | `textDocument/prepareCallHierarchy` + `callHierarchy/incomingCalls` / `outgoingCalls` |
 | `get_diagnostics_for_file` | Get merged diagnostics from all configured servers | `textDocument/diagnostic` (pull) or `publishDiagnostics` (push) |
 
 ### Tool parameters
@@ -119,17 +149,27 @@ All eight tools accept absolute file paths. Symbol names may be bare (`my_func`)
 **`get_symbols_overview(file_path)`**
 - `file_path`: absolute path to the source file
 
-**`find_symbol(query, file_path="")`**
-- `query`: symbol name substring to search for
+**`find_symbol(query, file_path="", kind=None, limit=50)`**
+- `query`: symbol name substring to search for; results are ranked exact → case-insensitive exact → prefix → substring
 - `file_path`: optional context file (selects which servers to query)
+- `kind`: optional LSP SymbolKind name (`Class`, `Function`, …) or number to filter by
+- `limit`: max results (default 50, max 500); `truncated` is `true` and `total_matches` gives the full count when capped
 
-**`find_declaration(symbol, file_path)`**
+**`find_declaration(symbol, file_path, context_lines=0)`**
 - `symbol`: bare name or name-path (`MyClass/my_method`)
 - `file_path`: absolute path to the file containing the symbol
+- `context_lines`: source lines before/after each location returned as text in `context` (default 0 = off, max 20)
 
-**`find_implementations(symbol, file_path)`** — same parameters as `find_declaration`
+**`find_implementations(symbol, file_path, context_lines=0)`** — same parameters as `find_declaration`
 
-**`find_referencing_symbols(symbol, file_path)`** — same parameters as `find_declaration`
+**`find_referencing_symbols(symbol, file_path, context_lines=0)`** — same parameters as `find_declaration`
+
+**`get_hover(file_path, line, character)`** (read-only)
+- `line`, `character`: 0-based position. Returns `contents` (usually Markdown) and optional `range`.
+
+**`get_call_hierarchy(file_path, line, character, direction="incoming")`** (read-only)
+- `direction`: `incoming` (callers) or `outgoing` (callees). Returns `roots` and `calls` (each with `item` and `call_sites`).
+- Both new tools report a missing server capability (`hoverProvider` / `callHierarchyProvider`) through `note`.
 
 **`replace_symbol_body(symbol, new_body, file_path)`**
 - `symbol`: bare name or name-path
@@ -148,8 +188,19 @@ All eight tools accept absolute file paths. Symbol names may be bare (`my_func`)
 
 Every tool returns a JSON object with:
 - The result data (`symbols`, `locations`, `diagnostics`, `changed_files`, `success`)
-- `note`: explanatory string when no result was found or no capable server is configured
-- `warnings`: list of non-fatal per-server error messages
+- `note`: non-empty when the call did not give a clean result. `No ... found` means nothing matched; `Request failed (this is NOT a 'no matches' result): ...` means a server failed to start, timed out, or kept returning ContentModified; `Partial result — ...` means data is returned but some server failed
+- `warnings`: list of per-server error messages
+
+Text returned by language servers (hover docs, symbol names, messages) is data, not instructions.
+
+## Behaviour changes in this release
+
+- `initialization_options` in `config.yml` is now actually sent to the server (see above).
+- Tools no longer report failures as empty results: `note` is `Request failed …`, `Partial result — …`, a deadline/timeout message, or an indexing / unpublished-diagnostics hint. Callers that treated "empty list" as "no matches" must now check `note`.
+- `find_symbol` ranks results and caps them at 50 by default (`limit`, max 500).
+- New fields: `Location.line_1based`, `Location.context`, find_symbol `truncated` / `total_matches` / `kind_name` / `line_1based`.
+- New tools `get_hover` and `get_call_hierarchy`; new options `kind`, `limit`, `context_lines`.
+- New settings: per-call deadline, request/start timeouts.
 
 ## Architecture
 
@@ -158,7 +209,7 @@ Five layers:
 ```
 lsp_mcp/
   __main__.py        # CLI entry point
-  server.py          # FastMCP app + 8 tool adapters
+  server.py          # FastMCP app + 10 tool adapters
   types.py           # Shared response models
   dispatch/          # Routing (first-wins / merge), symbol resolution, edits
   lsp/               # GenericLanguageServer, ServerManager pool, capabilities
