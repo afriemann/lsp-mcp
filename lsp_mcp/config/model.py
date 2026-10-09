@@ -13,7 +13,7 @@ class ServerSpec:
     command: tuple[str, ...]
     """Command to launch the server, e.g. ('uvx', 'ty', 'server')."""
     initialization_options: dict | None = None
-    """Reserved for v1; not consumed."""
+    """Sent verbatim as ``initializationOptions`` in the LSP initialize request."""
 
     def __post_init__(self) -> None:
         if not self.command:

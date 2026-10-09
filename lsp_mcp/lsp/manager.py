@@ -28,6 +28,8 @@ _ROOT_MARKERS = (
 _IDLE_TTL_SECONDS: float = 900.0  # 15 minutes
 _MAX_SERVERS: int = 20
 _EVICTION_INTERVAL: float = 60.0  # how often the background sweep runs
+DEFAULT_START_TIMEOUT: float = 30.0  # seconds allowed for process start + initialize
+_FAILURE_COOLDOWN: float = 30.0  # seconds a failed start is remembered (no re-spawn)
 
 
 def infer_project_root(file_path: str) -> str:
@@ -74,7 +76,13 @@ class ServerManager:
         idle_ttl: float = _IDLE_TTL_SECONDS,
         max_servers: int = _MAX_SERVERS,
         eviction_interval: float = _EVICTION_INTERVAL,
+        start_timeout: float = DEFAULT_START_TIMEOUT,
+        failure_cooldown: float = _FAILURE_COOLDOWN,
     ) -> None:
+        self._start_timeout = start_timeout
+        self._failure_cooldown = failure_cooldown
+        # key -> (monotonic time of failure, human-readable reason)
+        self._failures: dict[PoolKey, tuple[float, str]] = {}
         self._pool: dict[PoolKey, ServerEntry] = {}
         self._pool_lock = asyncio.Lock()
         self._key_locks: dict[PoolKey, asyncio.Lock] = {}
@@ -92,7 +100,9 @@ class ServerManager:
         Return a ready ``ServerEntry`` for (*spec.name*, inferred root of
         *file_path*), starting the server if absent.
 
-        Returns ``None`` when the server cannot start after one retry.
+        Returns ``None`` when the server cannot start (after one retry, unless
+        the start timed out) or failed within the last ``failure_cooldown``
+        seconds; the reason is available via :meth:`failure_reason`.
 
         Note: crash-retry for *active requests* (i.e. a transport error raised
         during a ``request_*`` call) is not implemented; the dispatch layer
@@ -115,8 +125,19 @@ class ServerManager:
                 entry.last_used = time.monotonic()
                 return entry
 
+            failed = self._failures.get(key)
+            if failed is not None:
+                if time.monotonic() - failed[0] < self._failure_cooldown:
+                    return None
+                del self._failures[key]
+
             # (Re-)start the server
             return await self._start(spec, root, key)
+
+    def failure_reason(self, server_name: str, file_path: str) -> str | None:
+        """Why the last start of *server_name* for *file_path*'s root failed, if it did."""
+        failed = self._failures.get((server_name, infer_project_root(file_path)))
+        return failed[1] if failed else None
 
     async def aclose(self) -> None:
         """Gracefully close all pool entries and stop the eviction sweep."""
@@ -159,6 +180,7 @@ class ServerManager:
         server = GenericLanguageServer(
             command=list(spec.command),
             repository_root_path=root,
+            initialization_options=spec.initialization_options,
         )
         entry = ServerEntry(
             server=server,
@@ -169,18 +191,34 @@ class ServerManager:
         )
         self._pool[key] = entry
 
+        start_cm = asyncio.timeout(self._start_timeout)
         try:
-            await exit_stack.enter_async_context(server.start_server())
+            async with start_cm:
+                await exit_stack.enter_async_context(server.start_server())
             entry.state = "ready"
+            self._failures.pop(key, None)
             logger.info("Started LSP server %r for root %r", spec.name, root)
             self._ensure_eviction_running()
             await self._enforce_cap()
             return entry
         except Exception as exc:
-            logger.warning("Failed to start LSP server %r: %s", spec.name, exc)
+            # Only *our* deadline counts as a start timeout; a TimeoutError
+            # raised from inside the server start is an ordinary failure.
+            timed_out = isinstance(exc, TimeoutError) and start_cm.expired()
+            detail = (
+                f"timed out after {self._start_timeout:g}s"
+                if timed_out
+                else (str(exc) or type(exc).__name__)
+            )
+            reason = detail  # no command line: it may hold credentials
+            logger.warning(
+                "Failed to start LSP server %r (command %r): %s",
+                spec.name, list(spec.command), reason,
+            )  # fmt: skip
             self._pool.pop(key, None)
             await self._close_entry(entry)
-            if retry:
+            self._failures[key] = (time.monotonic(), reason)
+            if retry and not timed_out:
                 logger.info("Retrying LSP server %r once", spec.name)
                 return await self._start(spec, root, key, retry=False)
             entry.state = "failed"

@@ -23,6 +23,7 @@ def _make_mock_server_handler(init_response: dict) -> MagicMock:
     handler.on_request = MagicMock()
     handler.start = AsyncMock()
     handler.shutdown = AsyncMock()
+    handler.stop = AsyncMock()
     handler.send_request = AsyncMock(return_value=None)
     return handler
 
@@ -160,3 +161,83 @@ async def test_raw_request_delegates_to_handler(tmp_path):
                 "workspace/symbol", {"query": "Foo"}
             )
             assert result == {"items": []}
+
+
+# --- process cleanup / init options on the wire ----------------------------
+
+
+def _patched(handler):
+    return patch(
+        "multilspy.language_server.LanguageServerHandler", return_value=handler
+    )
+
+
+@pytest.mark.asyncio
+async def test_initialization_options_on_the_wire(tmp_path):
+    handler = _make_mock_server_handler({"capabilities": {}})
+    handler.stop = AsyncMock()
+    with _patched(handler):
+        server = GenericLanguageServer(
+            command=["x"],
+            repository_root_path=str(tmp_path),
+            initialization_options={"tsserver": {"path": "/p"}},
+        )
+        async with server.start_server():
+            pass
+    params = handler.send.initialize.await_args.args[0]
+    assert params["initializationOptions"] == {"tsserver": {"path": "/p"}}
+
+
+@pytest.mark.asyncio
+async def test_process_stopped_on_normal_exit(tmp_path):
+    handler = _make_mock_server_handler({"capabilities": {}})
+    handler.stop = AsyncMock()
+    with _patched(handler):
+        server = GenericLanguageServer(
+            command=["x"], repository_root_path=str(tmp_path)
+        )
+        async with server.start_server():
+            handler.stop.assert_not_called()
+    handler.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_stopped_when_initialize_fails_without_command_in_message(
+    tmp_path,
+):
+    handler = _make_mock_server_handler({})
+    handler.send.initialize = AsyncMock(side_effect=RuntimeError("no tsserver"))
+    handler.stop = AsyncMock()
+    with _patched(handler):
+        server = GenericLanguageServer(
+            command=["secret-bin", "--token=abc"], repository_root_path=str(tmp_path)
+        )
+        with pytest.raises(RuntimeError) as ei:
+            async with server.start_server():
+                pass
+    handler.stop.assert_awaited_once()
+    assert "no tsserver" in str(ei.value)
+    assert "secret-bin" not in str(ei.value) and "abc" not in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_process_stopped_when_start_is_cancelled(tmp_path):
+    handler = _make_mock_server_handler({})
+
+    async def _hang(_params):
+        await asyncio.Event().wait()
+
+    handler.send.initialize = _hang
+    handler.stop = AsyncMock()
+    with _patched(handler):
+        server = GenericLanguageServer(
+            command=["x"], repository_root_path=str(tmp_path)
+        )
+
+        async def _run():
+            async with server.start_server():
+                pass
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_run(), 0.05)
+    handler.stop.assert_awaited_once()

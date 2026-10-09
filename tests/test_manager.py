@@ -212,3 +212,132 @@ async def test_lru_eviction_at_cap(tmp_path: Path) -> None:
 
     assert len(manager._pool) <= 2
     await manager.aclose()
+
+
+# --- start timeout / failure reason / init options -------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_timeout_returns_none_with_reason(tmp_path: Path) -> None:
+    import asyncio
+
+    f = tmp_path / "app.py"
+    f.touch()
+    server = _mock_server(str(tmp_path))
+
+    @asynccontextmanager
+    async def _hang():
+        await asyncio.Event().wait()
+        yield server
+
+    server.start_server = _hang
+    manager = ServerManager(start_timeout=0.05)
+    with patch("lsp_mcp.lsp.manager.GenericLanguageServer", return_value=server):
+        entry = await asyncio.wait_for(manager.acquire(_make_spec("tsls"), str(f)), 5)
+    assert entry is None
+    reason = manager.failure_reason("tsls", str(f))
+    assert "timed out" in reason
+
+
+@pytest.mark.asyncio
+async def test_failure_reason_includes_command_and_error(tmp_path: Path) -> None:
+    f = tmp_path / "app.py"
+    f.touch()
+    server = _mock_server(str(tmp_path))
+
+    @asynccontextmanager
+    async def _boom():
+        raise RuntimeError("Could not find a valid TypeScript installation")
+        yield server
+
+    server.start_server = _boom
+    manager = ServerManager()
+    with patch("lsp_mcp.lsp.manager.GenericLanguageServer", return_value=server):
+        assert await manager.acquire(_make_spec("tsls"), str(f)) is None
+    reason = manager.failure_reason("tsls", str(f))
+    assert "TypeScript installation" in reason
+    assert "command" not in reason and "['tsls'" not in reason
+
+
+@pytest.mark.asyncio
+async def test_failed_start_is_cooled_down(tmp_path: Path) -> None:
+    f = tmp_path / "app.py"
+    f.touch()
+    server = _mock_server(str(tmp_path))
+    starts = 0
+
+    @asynccontextmanager
+    async def _boom():
+        nonlocal starts
+        starts += 1
+        raise RuntimeError("nope")
+        yield server
+
+    server.start_server = _boom
+    manager = ServerManager(failure_cooldown=60)
+    with patch("lsp_mcp.lsp.manager.GenericLanguageServer", return_value=server):
+        await manager.acquire(_make_spec(), str(f))
+        first = starts
+        await manager.acquire(_make_spec(), str(f))
+    assert starts == first
+
+
+@pytest.mark.asyncio
+async def test_initialization_options_passed_to_server(tmp_path: Path) -> None:
+    f = tmp_path / "app.py"
+    f.touch()
+    server = _mock_server(str(tmp_path))
+    spec = ServerSpec(name="tsls", command=("tsls",), initialization_options={"a": 1})
+    manager = ServerManager()
+    with patch(
+        "lsp_mcp.lsp.manager.GenericLanguageServer", return_value=server
+    ) as ctor:
+        await manager.acquire(spec, str(f))
+    assert ctor.call_args.kwargs["initialization_options"] == {"a": 1}
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cooldown_expiry_allows_respawn(tmp_path: Path) -> None:
+    f = tmp_path / "app.py"
+    f.touch()
+    server = _mock_server(str(tmp_path))
+    starts = 0
+
+    @asynccontextmanager
+    async def _boom():
+        nonlocal starts
+        starts += 1
+        raise RuntimeError("nope")
+        yield server
+
+    server.start_server = _boom
+    manager = ServerManager(failure_cooldown=0.05)
+    with patch("lsp_mcp.lsp.manager.GenericLanguageServer", return_value=server):
+        await manager.acquire(_make_spec(), str(f))
+        first = starts
+        await manager.acquire(_make_spec(), str(f))
+        assert starts == first  # still cooling down
+        await asyncio.sleep(0.08)
+        await manager.acquire(_make_spec(), str(f))
+    assert starts > first
+
+
+@pytest.mark.asyncio
+async def test_inner_timeout_during_start_not_labelled_as_start_timeout(
+    tmp_path: Path,
+) -> None:
+    f = tmp_path / "app.py"
+    f.touch()
+    server = _mock_server(str(tmp_path))
+
+    @asynccontextmanager
+    async def _inner():
+        raise asyncio.TimeoutError("inner")
+        yield server
+
+    server.start_server = _inner
+    manager = ServerManager(start_timeout=30)
+    with patch("lsp_mcp.lsp.manager.GenericLanguageServer", return_value=server):
+        assert await manager.acquire(_make_spec(), str(f)) is None
+    assert "timed out after 30s" not in manager.failure_reason("ty", str(f))

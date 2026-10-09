@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import pathlib
@@ -17,6 +16,8 @@ from multilspy.multilspy_config import MultilspyConfig
 from multilspy.multilspy_logger import MultilspyLogger
 
 from .capabilities import CapabilitySet
+
+logger = logging.getLogger(__name__)
 
 # Client capabilities we advertise to the server.
 # Broad enough to enable all features we need.
@@ -41,6 +42,11 @@ _CLIENT_CAPABILITIES: dict[str, Any] = {
         "definition": {"dynamicRegistration": False},
         "references": {"dynamicRegistration": False},
         "implementation": {"dynamicRegistration": False},
+        "hover": {
+            "dynamicRegistration": False,
+            "contentFormat": ["markdown", "plaintext"],
+        },
+        "callHierarchy": {"dynamicRegistration": False},
         "rename": {"dynamicRegistration": False, "prepareSupport": False},
         "publishDiagnostics": {"relatedInformation": False},
         "diagnostic": {"dynamicRegistration": False, "relatedDocumentSupport": False},
@@ -69,6 +75,7 @@ class GenericLanguageServer(LanguageServer):
         *,
         logger: MultilspyLogger | None = None,
         language_id: str = "plaintext",
+        initialization_options: dict[str, Any] | None = None,
     ) -> None:
         if not command:
             raise ValueError("command must not be empty")
@@ -90,6 +97,7 @@ class GenericLanguageServer(LanguageServer):
             language_id=language_id,
         )
         self._command = command
+        self._initialization_options = initialization_options
         self._capabilities: CapabilitySet = CapabilitySet({})
         # per-URI push diagnostics cache: uri -> list[dict]
         self._push_diagnostics: dict[str, list[dict[str, Any]]] = {}
@@ -139,57 +147,71 @@ class GenericLanguageServer(LanguageServer):
         self.server.on_request("client/registerCapability", lambda p: None)
 
         async with super().start_server():
-            await self.server.start()
-
-            root_uri = pathlib.Path(self.repository_root_path).as_uri()
-            initialize_params: dict[str, Any] = {
-                "processId": os.getpid(),
-                "clientInfo": {"name": "lsp-mcp", "version": "0.1.0"},
-                "rootUri": root_uri,
-                "rootPath": self.repository_root_path,
-                "workspaceFolders": [
-                    {
-                        "uri": root_uri,
-                        "name": os.path.basename(self.repository_root_path),
-                    }
-                ],
-                "capabilities": _CLIENT_CAPABILITIES,
-                "initializationOptions": None,
-                "trace": "off",
-            }
-
             try:
-                init_response = await self.server.send.initialize(initialize_params)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"LSP initialize failed for command {self._command!r}: {exc}"
-                ) from exc
+                await self.server.start()
+                await self._initialize()
+                yield self
+                try:
+                    await self.server.shutdown()
+                except Exception:
+                    pass  # best-effort shutdown
+            finally:
+                # Always reap the subprocess — on normal exit, initialize
+                # failure, and cancellation (e.g. a start timeout) alike.
+                try:
+                    await self.server.stop()
+                except Exception as exc:
+                    logger.debug("Error stopping language server: %s", exc)
 
-            raw_caps = {}
-            if isinstance(init_response, dict):
-                raw_caps = init_response.get("capabilities", {})
-            self._capabilities = CapabilitySet(raw_caps)
+    async def _initialize(self) -> None:
+        """Run the LSP initialize handshake and capture capabilities."""
+        root_uri = pathlib.Path(self.repository_root_path).as_uri()
+        initialize_params: dict[str, Any] = {
+            "processId": os.getpid(),
+            "clientInfo": {"name": "lsp-mcp", "version": "0.1.0"},
+            "rootUri": root_uri,
+            "rootPath": self.repository_root_path,
+            "workspaceFolders": [
+                {
+                    "uri": root_uri,
+                    "name": os.path.basename(self.repository_root_path),
+                }
+            ],
+            "capabilities": _CLIENT_CAPABILITIES,
+            "initializationOptions": self._initialization_options,
+            "trace": "off",
+        }
 
-            self.server.notify.initialized({})
-            self.completions_available.set()
+        try:
+            init_response = await self.server.send.initialize(initialize_params)
+        except Exception as exc:
+            # The command line is deliberately NOT included: it can carry
+            # credentials and this message reaches the agent.  Log it instead.
+            logger.warning(
+                "LSP initialize failed for command %r: %s", self._command, exc
+            )
+            raise RuntimeError(f"LSP initialize failed: {exc}") from exc
 
-            yield self
+        raw_caps = {}
+        if isinstance(init_response, dict):
+            raw_caps = init_response.get("capabilities", {})
+        self._capabilities = CapabilitySet(raw_caps)
 
-            try:
-                await self.server.shutdown()
-            except Exception:
-                pass  # best-effort shutdown
+        self.server.notify.initialized({})
+        self.completions_available.set()
 
-    async def wait_for_diagnostics(self, uri: str, timeout: float = 2.0) -> None:
+    async def wait_for_diagnostics(self, uri: str, timeout: float = 2.0) -> bool:
         """
         Wait up to *timeout* seconds for pushed diagnostics for *uri*.
         Returns immediately if diagnostics have already arrived.
+        Returns True if diagnostics for *uri* were published, False on timeout.
         """
         if uri not in self._diag_event:
             self._diag_event[uri] = asyncio.Event()
         if uri in self._push_diagnostics:
-            return
+            return True
         try:
             await asyncio.wait_for(self._diag_event[uri].wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            pass  # return whatever we have
+        except TimeoutError:
+            return False
+        return True
