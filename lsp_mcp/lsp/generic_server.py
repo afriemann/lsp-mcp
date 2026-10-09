@@ -58,25 +58,50 @@ _CLIENT_CAPABILITIES: dict[str, Any] = {
 }
 
 
+# Extension -> LSP language identifier (https://microsoft.github.io/language-server-protocol/
+# specifications/lsp/3.17/specification/#textDocumentItem).  ``.h`` maps to ``c``
+# (clangd's default); C++ headers using ``.h`` are therefore opened as C — a
+# known trade-off, use ``.hpp``/``.hh``/``.hxx`` for C++ headers.
 _LANGUAGE_IDS: dict[str, str] = {
     ".py": "python", ".pyi": "python", ".pyw": "python",
     ".ts": "typescript", ".mts": "typescript", ".cts": "typescript",
     ".tsx": "typescriptreact",
     ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
     ".jsx": "javascriptreact",
-    ".go": "go", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".hpp": "cpp",
-    ".html": "html", ".htm": "html", ".css": "css", ".json": "json",
+    ".go": "go", ".c": "c", ".h": "c",
+    ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".c++": "cpp",
+    ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
+    ".html": "html", ".htm": "html", ".css": "css", ".scss": "scss", ".less": "less",
+    ".json": "json", ".jsonc": "jsonc", ".xml": "xml", ".md": "markdown",
+    ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
     ".rs": "rust", ".java": "java", ".rb": "ruby", ".sh": "shellscript",
+    ".lua": "lua", ".kt": "kotlin", ".kts": "kotlin", ".cs": "csharp",
+    ".php": "php", ".swift": "swift", ".vue": "vue", ".svelte": "svelte",
+    ".tf": "terraform", ".zig": "zig",
 }  # fmt: skip
+
+# Extensionless files recognised by exact (lower-cased) name.
+_LANGUAGE_IDS_BY_NAME: dict[str, str] = {
+    "makefile": "makefile",
+    "gnumakefile": "makefile",
+    "dockerfile": "dockerfile",
+}
 
 
 def language_id_for(path: str) -> str:
-    """LSP ``languageId`` for *path* by extension; ``plaintext`` if unknown.
+    """LSP ``languageId`` for *path*; ``plaintext`` only when unknown.
 
-    Servers such as ty ignore documents opened with the wrong languageId and
-    answer every request as if the file were empty/clean.
+    Matching is case-insensitive: first the exact file name (``Makefile``,
+    ``Dockerfile``), then the extension.  Dotfiles such as ``.gitignore`` have no
+    extension and are ``plaintext``.  Servers such as ty ignore documents opened
+    with the wrong languageId and answer every request as if the file were
+    empty/clean.
     """
-    return _LANGUAGE_IDS.get(pathlib.PurePath(path).suffix.lower(), "plaintext")
+    p = pathlib.PurePath(path)
+    by_name = _LANGUAGE_IDS_BY_NAME.get(p.name.lower())
+    if by_name:
+        return by_name
+    return _LANGUAGE_IDS.get(p.suffix.lower(), "plaintext")
 
 
 class GenericLanguageServer(LanguageServer):

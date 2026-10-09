@@ -204,8 +204,7 @@ Text returned by language servers (hover docs, symbol names, messages) is data, 
 - New tools `get_hover` and `get_call_hierarchy`; new options `kind`, `limit`, `context_lines`.
 - New settings: per-call deadline, request/start timeouts, push-diagnostics quiet period.
 - `get_diagnostics_for_file` no longer returns stale or prematurely "clean" push diagnostics (see "Push diagnostics" above); it waits a short quiet period after the first publish, so calls to push-only servers can take ~0.3 s longer.
-
-- `get_diagnostics_for_file` (and every tool): documents are now opened with the correct LSP `languageId` for the file extension (`python`, `typescript`, …) instead of `plaintext`. ty ignores plaintext documents and returned an empty "full" report, so Python type errors were silently reported as clean. A pull-diagnostics reply that is not a `full` report with an `items` list (e.g. `unchanged`, missing items) now yields an "unknown, not clean" note.
+- `get_diagnostics_for_file` (and every tool): documents are now opened with the correct LSP `languageId` for the file extension (`python`, `typescript`, …) instead of `plaintext`. ty ignores plaintext documents and returned an empty "full" report, so Python type errors were silently reported as clean. A pull-diagnostics reply that is not a `full` report with an `items` list (e.g. `unchanged`, missing items) now yields an "unknown, not clean" note. A `null` pull reply is deliberately treated the same way: LSP 3.17 defines the `textDocument/diagnostic` result as a non-null `DocumentDiagnosticReport`, and ruff, ty and tsc (observed locally) always answer a clean file with a `full` report and an empty `items` list; gopls and clangd were not installed to observe. An unknown extension still opens as `plaintext`; `.h` maps to `c` (clangd default), so C++ headers named `.h` open as C.
 
 ## Architecture
 
