@@ -82,6 +82,7 @@ file_handlers:
 | Per-request timeout (each LSP request attempt) | 15 s | `--request-timeout SECONDS` or env `LSP_MCP_REQUEST_TIMEOUT` |
 | Server start + initialize timeout | 30 s | `--start-timeout SECONDS` or env `LSP_MCP_START_TIMEOUT` |
 | Per-call deadline (whole tool call) | 30 s | `--call-deadline SECONDS` or env `LSP_MCP_CALL_DEADLINE` |
+| Push-diagnostics quiet period | 0.3 s | `--diagnostics-quiet-period SECONDS` or env `LSP_MCP_DIAGNOSTICS_QUIET_PERIOD` |
 
 Values must be positive; the CLI rejects zero, negative and non-numeric values, and invalid environment values are ignored with a warning.
 
@@ -91,6 +92,7 @@ Values must be positive; the CLI rejects zero, negative and non-numeric values, 
 - **Serialisation:** requests to one language server are serialised (per-server lock). Read tools open the document once per call; `replace_symbol_body` and `rename_symbol` hold the locks of every server they notify.
 - **Start failures:** a server that fails to start (or times out starting) is not respawned for 30 s. The `note` of every result it affects carries the server name and the error. The command line is deliberately not included (it may contain credentials); it is written to the log (`--log-level WARNING`).
 - **Empty results that are not "no":** an empty document/workspace symbol answer adds a "may still be indexing" hint to the note; a push-diagnostics server that publishes nothing within 2 s yields a note saying the result is unknown, not clean.
+- **Push diagnostics** (servers without pull diagnostics, e.g. `ruff`): after the document is opened for the call, any earlier cached publish is discarded, so only a publish that arrives *after this call's `didOpen`* is used. The call waits for the first publish (up to 2 s), then until no further publish arrives for the **quiet period** (default 0.3 s) and uses the **last** one — servers typically send syntax diagnostics first and semantic ones later. Publishes for documents that are not open (e.g. the empty one many servers send after `didClose`) are ignored, and a publish whose `version` differs from the version we sent is discarded. No publish at all gives the "unknown, not clean" note; an explicitly published empty list after our open means clean. Per-document state is dropped when the call ends, and the document is closed (`didClose`) even if the call fails, is cancelled or hits the call deadline. If the document is already open when the call starts, the cached diagnostics are returned as they are. Set the quiet period with `--diagnostics-quiet-period SECONDS` or env `LSP_MCP_DIAGNOSTICS_QUIET_PERIOD` (positive values only). **Residual race:** a late publish caused by the previous call's `didClose` that carries no `version` and lands after the new document was opened cannot be told apart from a real one; it can make that call report a stale (typically empty) result if the server's real publish is slower than the quiet period. The quiet period narrows this window but does not close it.
 - **`context_lines`** only reads files inside the project root of the queried file (symlinks resolved), at most 2 MiB per file; other locations are returned without `context`.
 
 ### Server binaries
@@ -200,7 +202,8 @@ Text returned by language servers (hover docs, symbol names, messages) is data, 
 - `find_symbol` ranks results and caps them at 50 by default (`limit`, max 500).
 - New fields: `Location.line_1based`, `Location.context`, find_symbol `truncated` / `total_matches` / `kind_name` / `line_1based`.
 - New tools `get_hover` and `get_call_hierarchy`; new options `kind`, `limit`, `context_lines`.
-- New settings: per-call deadline, request/start timeouts.
+- New settings: per-call deadline, request/start timeouts, push-diagnostics quiet period.
+- `get_diagnostics_for_file` no longer returns stale or prematurely "clean" push diagnostics (see "Push diagnostics" above); it waits a short quiet period after the first publish, so calls to push-only servers can take ~0.3 s longer.
 
 ## Architecture
 
