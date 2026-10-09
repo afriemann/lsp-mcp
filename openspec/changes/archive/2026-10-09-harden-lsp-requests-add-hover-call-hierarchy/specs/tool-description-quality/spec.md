@@ -1,9 +1,4 @@
-# tool-description-quality Specification
-
-## Purpose
-TBD - created by archiving change improve-tool-descriptions-for-proactive-use. Update Purpose after archive.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Each MCP tool description includes a trigger condition and semantic advantage
 Each of the ten MCP tool descriptions registered in `server.py` SHALL open with a trigger condition — a sentence beginning "Use …" (for example "Use before…", "Use when…", "Use to…", "Use instead of…") — that tells an agent when to reach for the tool proactively rather than falling back to grep or full file reads. The description SHALL also state, in one clause, the semantic advantage over text search where one exists, SHALL state inputs and outputs, SHALL state that line/character positions are 0-based (for tools that take or return positions), and SHALL state how failure is signalled through `note`. Descriptions are no longer limited to three sentences.
@@ -31,18 +26,3 @@ Each of the ten MCP tool descriptions registered in `server.py` SHALL open with 
 #### Scenario: Position convention and failure signalling stated
 - **WHEN** an agent reads any position-bearing tool description
 - **THEN** it states that line/character are 0-based and explains what a non-empty `note` means
-
-### Requirement: Tool descriptions preserve correct parameter guidance
-Each tool description SHALL retain accurate parameter-level guidance: `file_path` parameters that require an absolute path SHALL be documented as such, and the `note` field check instruction SHALL remain in every description. The decorator rule for `replace_symbol_body` SHALL be preserved verbatim. No existing parameter-level detail SHALL be removed.
-
-#### Scenario: file_path absolute path requirement preserved
-- **WHEN** an agent reads any tool description where file_path must be absolute
-- **THEN** the description states "absolute" path is required for that parameter
-
-#### Scenario: note field check instruction preserved
-- **WHEN** an agent reads any tool description
-- **THEN** the description instructs the agent to check the note field first and states what a non-empty note means
-
-#### Scenario: replace_symbol_body decorator rule preserved
-- **WHEN** an agent reads the `replace_symbol_body` tool description
-- **THEN** the description explains that new_body starting without '@' preserves existing decorators and new_body starting with '@' replaces them
