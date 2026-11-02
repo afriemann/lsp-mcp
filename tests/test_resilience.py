@@ -75,9 +75,11 @@ async def test_retry_then_success(tmp_path: Path, code: int) -> None:
     assert server.request_workspace_symbol.await_count == 3
 
 
-async def test_retries_exhausted_is_explicit_error_not_empty_match(
+async def test_retries_exhausted(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # spec: openspec/specs/mcp-tools/spec.md
     server = _make_server(str(tmp_path), {"workspaceSymbolProvider": True})
     server.request_workspace_symbol = AsyncMock(
         side_effect=Error(-32801, "content modified")
@@ -88,6 +90,14 @@ async def test_retries_exhausted_is_explicit_error_not_empty_match(
     assert "failed" in r.note.lower() and "-32801" in r.note and "'s1'" in r.note
     assert "No symbols matching" not in r.note
     assert server.request_workspace_symbol.await_count == 4  # 1 + 3 retries
+    from lsp_mcp.server import build_app
+
+    monkeypatch.setattr("lsp_mcp.server.load_config", lambda *a, **kw: d._config)
+    monkeypatch.setattr("lsp_mcp.server.Dispatcher", lambda **kw: d)
+    result = await build_app().call_tool(
+        "find_symbol", {"query": "foo", "file_path": str(f)}
+    )
+    assert result.is_error
 
 
 async def test_non_retryable_error_not_retried(tmp_path: Path) -> None:

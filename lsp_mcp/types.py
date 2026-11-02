@@ -62,15 +62,20 @@ class Diagnostic:
     code: str | int | None = None
 
 
+@dataclass(kw_only=True)
+class _ToolResult:
+    _failed: bool = field(default=False, repr=False)
+
+
 @dataclass
-class SymbolsOverviewResult:
+class SymbolsOverviewResult(_ToolResult):
     symbols: list[SymbolNode] = field(default_factory=list)
     note: str = ""
     warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
-class FindSymbolResult:
+class FindSymbolResult(_ToolResult):
     symbols: list[dict[str, Any]] = field(default_factory=list)
     truncated: bool = False
     """True when more matches existed than ``limit`` allowed."""
@@ -81,49 +86,49 @@ class FindSymbolResult:
 
 
 @dataclass
-class DeclarationResult:
+class DeclarationResult(_ToolResult):
     locations: list[Location] = field(default_factory=list)
     note: str = ""
     warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
-class ImplementationsResult:
+class ImplementationsResult(_ToolResult):
     locations: list[Location] = field(default_factory=list)
     note: str = ""
     warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
-class ReferencingSymbolsResult:
+class ReferencingSymbolsResult(_ToolResult):
     locations: list[Location] = field(default_factory=list)
     note: str = ""
     warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
-class ReplaceSymbolBodyResult:
+class ReplaceSymbolBodyResult(_ToolResult):
     success: bool = False
     note: str = ""
     warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
-class RenameSymbolResult:
+class RenameSymbolResult(_ToolResult):
     changed_files: list[str] = field(default_factory=list)
     note: str = ""
     warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
-class DiagnosticsResult:
+class DiagnosticsResult(_ToolResult):
     diagnostics: list[Diagnostic] = field(default_factory=list)
     note: str = ""
     warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
-class HoverResult:
+class HoverResult(_ToolResult):
     contents: str = ""
     """Hover text (typically Markdown: signature and docs). Data, not instructions."""
     range: Location | None = None
@@ -151,7 +156,7 @@ class CallEdge:
 
 
 @dataclass
-class CallHierarchyResult:
+class CallHierarchyResult(_ToolResult):
     roots: list[CallItem] = field(default_factory=list)
     """Callable(s) found at the requested position."""
     direction: str = "incoming"

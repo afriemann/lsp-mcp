@@ -86,6 +86,11 @@ class _Ctx:
     failures: list[str] = field(default_factory=list)
     hints: list[str] = field(default_factory=list)
     """Caveats that apply only to an *empty* result (e.g. server still indexing)."""
+    completed: bool = False
+
+    def answer(self) -> None:
+        """Record a completed tool operation, including a valid empty answer."""
+        self.completed = True
 
     def hint(self, message: str) -> None:
         if message not in self.hints:
@@ -95,21 +100,19 @@ class _Ctx:
         self.failures.append(message)
         self.warnings.append(message)
 
-    def note(self, found: bool, empty_note: str) -> str:
-        """Compose the result note.
-
-        Failures are never hidden behind an "empty" note: if nothing was found
-        and anything failed, the note says the request failed.  If something was
-        found despite failures, the note flags the result as partial.
-        """
-        if not self.failures:
-            if found:
-                return ""
-            return " ".join(p for p in (empty_note, *self.hints) if p)
-        detail = "; ".join(self.failures)
-        if found:
-            return f"Partial result — some servers failed: {detail}"
-        return f"Request failed (this is NOT a 'no matches' result): {detail}"
+    def result_fields(self, found: bool, empty_note: str) -> dict[str, Any]:
+        failed = bool(self.failures) and not self.completed
+        if self.failures:
+            detail = "; ".join(self.failures)
+            note = (
+                f"Request failed (this is NOT a 'no matches' result): {detail}"
+                if failed
+                else f"Partial result - some servers failed: {detail}"
+            )
+            note = " ".join((note, *self.hints))
+        else:
+            note = "" if found else " ".join(p for p in (empty_note, *self.hints) if p)
+        return {"note": note, "warnings": self.warnings, "_failed": failed}
 
 
 @dataclass
@@ -117,6 +120,7 @@ class _Outcome:
     items: list[Any] = field(default_factory=list)
     note: str = ""
     warnings: list[str] = field(default_factory=list)
+    _failed: bool = False
 
 
 def _error_code(exc: BaseException) -> int | None:
@@ -159,7 +163,7 @@ def with_deadline(result_cls: type):
                     "deadline (waiting for the server lock, requests and retries); "
                     "the result is unknown — this is NOT a 'no matches' result."
                 )
-                return result_cls(note=msg, warnings=[msg])
+                return result_cls(note=msg, warnings=[msg], _failed=True)
             finally:
                 _deadline_cm.reset(token)
 
@@ -357,8 +361,9 @@ class Dispatcher:
         )
         if not any(e for _, e in servers):
             return SymbolsOverviewResult(
-                note=ctx.note(False, _no_cap_note(abs_path, "documentSymbolProvider")),
-                warnings=ctx.warnings,
+                **ctx.result_fields(
+                    False, _no_cap_note(abs_path, "documentSymbolProvider")
+                ),
             )
 
         root = infer_project_root(abs_path)
@@ -373,25 +378,25 @@ class Dispatcher:
                         raw, _ = await self._req(
                             spec.name,
                             "textDocument/documentSymbol",
-                            lambda: server.request_document_symbols(rel),
+                            lambda server=server: server.request_document_symbols(rel),
                         )
                 if not raw:
                     ctx.hint(_INDEXING_HINT)
                 nodes = _symbols_to_nodes(raw)
+                ctx.answer()
                 if nodes:
                     return SymbolsOverviewResult(
                         symbols=nodes,
-                        note=ctx.note(True, ""),
-                        warnings=ctx.warnings,
+                        **ctx.result_fields(True, ""),
                     )
             except LspRequestError as exc:
                 ctx.fail(str(exc))
             except Exception as exc:
+                logger.debug("Server operation failed", exc_info=True)
                 ctx.fail(f"Server '{spec.name}': {exc}")
 
         return SymbolsOverviewResult(
-            note=ctx.note(False, f"No symbols found in {abs_path}"),
-            warnings=ctx.warnings,
+            **ctx.result_fields(False, f"No symbols found in {abs_path}"),
         )
 
     @with_deadline(FindSymbolResult)
@@ -425,10 +430,9 @@ class Dispatcher:
             pairs = await self._acquire_servers(route_path, ToolKind.FIND_SYMBOL, ctx)
             if not any(e for _, e in pairs):
                 return FindSymbolResult(
-                    note=ctx.note(
+                    **ctx.result_fields(
                         False, _no_cap_note(route_path, "workspaceSymbolProvider")
                     ),
-                    warnings=ctx.warnings,
                 )
             empty = f"No symbols matching '{query}'"
             route_rel = self._rel(route_path, infer_project_root(route_path))
@@ -445,13 +449,16 @@ class Dispatcher:
                         raw = await self._req(
                             spec.name,
                             "workspace/symbol",
-                            lambda: server.request_workspace_symbol(query),
+                            lambda server=server: server.request_workspace_symbol(
+                                query
+                            ),
                         )
                 if not raw:
                     ctx.hint(_INDEXING_HINT)
                 symbols = _normalise_workspace_symbols(raw)
                 if kind_num is not None:
                     symbols = [s for s in symbols if s["kind"] == kind_num]
+                ctx.answer()
                 if symbols:
                     symbols = _rank_symbols(symbols, query)
                     total = len(symbols)
@@ -459,15 +466,15 @@ class Dispatcher:
                         symbols=symbols[:limit],
                         truncated=total > limit,
                         total_matches=total,
-                        note=ctx.note(True, ""),
-                        warnings=ctx.warnings,
+                        **ctx.result_fields(True, ""),
                     )
             except LspRequestError as exc:
                 ctx.fail(str(exc))
             except Exception as exc:
+                logger.debug("Server operation failed", exc_info=True)
                 ctx.fail(f"Server '{spec.name}': {exc}")
 
-        return FindSymbolResult(note=ctx.note(False, empty), warnings=ctx.warnings)
+        return FindSymbolResult(**ctx.result_fields(False, empty))
 
     async def _all_servers(
         self, ctx: _Ctx
@@ -504,8 +511,7 @@ class Dispatcher:
         servers = await self._acquire_servers(abs_path, tool, ctx)
         if not any(e for _, e in servers):
             return _Outcome(
-                note=ctx.note(False, _no_cap_note(abs_path, capability)),
-                warnings=ctx.warnings,
+                **ctx.result_fields(False, _no_cap_note(abs_path, capability)),
             )
 
         root = infer_project_root(abs_path)
@@ -524,28 +530,31 @@ class Dispatcher:
                             spec, server, rel, symbol, ctx
                         )
                         if pos is None:
+                            ctx.answer()
                             continue
                         if isinstance(pos, list):
+                            ctx.answer()
                             return _Outcome(
-                                note=f"Ambiguous symbol '{symbol}': {', '.join(pos)}",
-                                warnings=ctx.warnings,
+                                **ctx.result_fields(
+                                    False,
+                                    f"Ambiguous symbol '{symbol}': {', '.join(pos)}",
+                                ),
                             )
                         locations = await request(spec, server, rel, abs_path, pos)
+                ctx.answer()
                 if locations:
                     _add_context(
                         locations, context_lines, [root, server.repository_root_path]
                     )
-                    return _Outcome(
-                        items=locations, note=ctx.note(True, ""), warnings=ctx.warnings
-                    )
+                    return _Outcome(items=locations, **ctx.result_fields(True, ""))
             except LspRequestError as exc:
                 ctx.fail(str(exc))
             except Exception as exc:
+                logger.debug("Server operation failed", exc_info=True)
                 ctx.fail(f"Server '{spec.name}': {exc}")
 
         return _Outcome(
-            note=ctx.note(False, f"No {what} found for '{symbol}'"),
-            warnings=ctx.warnings,
+            **ctx.result_fields(False, f"No {what} found for '{symbol}'"),
         )
 
     @with_deadline(DeclarationResult)
@@ -564,7 +573,9 @@ class Dispatcher:
             symbol, file_path, ToolKind.FIND_DECLARATION, "definitionProvider",
             "declaration", request, context_lines,
         )  # fmt: skip
-        return DeclarationResult(locations=o.items, note=o.note, warnings=o.warnings)
+        return DeclarationResult(
+            locations=o.items, note=o.note, warnings=o.warnings, _failed=o._failed
+        )
 
     @with_deadline(ImplementationsResult)
     async def find_implementations(
@@ -589,7 +600,7 @@ class Dispatcher:
             "implementations", request, context_lines,
         )  # fmt: skip
         return ImplementationsResult(
-            locations=o.items, note=o.note, warnings=o.warnings
+            locations=o.items, note=o.note, warnings=o.warnings, _failed=o._failed
         )
 
     @with_deadline(ReferencingSymbolsResult)
@@ -609,7 +620,7 @@ class Dispatcher:
             "references", request, context_lines,
         )  # fmt: skip
         return ReferencingSymbolsResult(
-            locations=o.items, note=o.note, warnings=o.warnings
+            locations=o.items, note=o.note, warnings=o.warnings, _failed=o._failed
         )
 
     @with_deadline(ReplaceSymbolBodyResult)
@@ -623,8 +634,9 @@ class Dispatcher:
         )
         if not any(e for _, e in servers):
             return ReplaceSymbolBodyResult(
-                note=ctx.note(False, _no_cap_note(abs_path, "documentSymbolProvider")),
-                warnings=ctx.warnings,
+                **ctx.result_fields(
+                    False, _no_cap_note(abs_path, "documentSymbolProvider")
+                ),
             )
 
         root = infer_project_root(abs_path)
@@ -652,20 +664,23 @@ class Dispatcher:
                 raw, _ = await self._req(
                     spec.name,
                     "textDocument/documentSymbol",
-                    lambda: server.request_document_symbols(rel),
+                    lambda server=server: server.request_document_symbols(rel),
                 )
                 if not raw:
                     ctx.hint(_INDEXING_HINT)
                 matches = resolve_symbol(symbol, [_unifiedsym_to_dict(s) for s in raw])
                 if not matches:
+                    ctx.answer()
                     continue
                 if len(matches) > 1:
+                    ctx.answer()
                     names = [
                         f"{m.name} (line {m.full_range.start_line})" for m in matches
                     ]
                     return ReplaceSymbolBodyResult(
-                        note=f"Ambiguous symbol '{symbol}': {', '.join(names)}",
-                        warnings=ctx.warnings,
+                        **ctx.result_fields(
+                            False, f"Ambiguous symbol '{symbol}': {', '.join(names)}"
+                        ),
                     )
                 sym = matches[0]
                 all_servers = [e2.server for _, e2 in servers if e2 is not None]
@@ -697,17 +712,18 @@ class Dispatcher:
                 else:
                     edit_range = sym.full_range
                 apply_edit(abs_path, edit_range, new_body, all_servers)
+                ctx.answer()
                 return ReplaceSymbolBodyResult(
-                    success=True, note=ctx.note(True, ""), warnings=ctx.warnings
+                    success=True, **ctx.result_fields(True, "")
                 )
             except LspRequestError as exc:
                 ctx.fail(str(exc))
             except Exception as exc:
+                logger.debug("Server operation failed", exc_info=True)
                 ctx.fail(f"Server '{spec.name}': {exc}")
 
         return ReplaceSymbolBodyResult(
-            note=ctx.note(False, f"Symbol '{symbol}' not found in {abs_path}"),
-            warnings=ctx.warnings,
+            **ctx.result_fields(False, f"Symbol '{symbol}' not found in {abs_path}"),
         )
 
     @with_deadline(RenameSymbolResult)
@@ -719,8 +735,7 @@ class Dispatcher:
         servers = await self._acquire_servers(abs_path, ToolKind.RENAME_SYMBOL, ctx)
         if not any(e for _, e in servers):
             return RenameSymbolResult(
-                note=ctx.note(False, _no_cap_note(abs_path, "renameProvider")),
-                warnings=ctx.warnings,
+                **ctx.result_fields(False, _no_cap_note(abs_path, "renameProvider")),
             )
 
         root = infer_project_root(abs_path)
@@ -734,11 +749,14 @@ class Dispatcher:
                 try:
                     pos = await self._resolve_position(spec, server, rel, symbol, ctx)
                     if pos is None:
+                        ctx.answer()
                         continue
                     if isinstance(pos, list):
+                        ctx.answer()
                         return RenameSymbolResult(
-                            note=f"Ambiguous symbol '{symbol}': {', '.join(pos)}",
-                            warnings=ctx.warnings,
+                            **ctx.result_fields(
+                                False, f"Ambiguous symbol '{symbol}': {', '.join(pos)}"
+                            ),
                         )
                     # ty (and other servers) require the document to be open via
                     # didOpen before accepting textDocument/rename requests.
@@ -746,7 +764,7 @@ class Dispatcher:
                         workspace_edit = await self._req(
                             spec.name,
                             "textDocument/rename",
-                            lambda: server.raw_request(
+                            lambda server=server, pos=pos: server.raw_request(
                                 "textDocument/rename",
                                 {
                                     "textDocument": {
@@ -763,19 +781,20 @@ class Dispatcher:
                     if workspace_edit:
                         all_servers = [e2.server for _, e2 in servers if e2 is not None]
                         changed = apply_workspace_edit(workspace_edit, all_servers)
+                        ctx.answer()
                         return RenameSymbolResult(
                             changed_files=changed,
-                            note=ctx.note(True, ""),
-                            warnings=ctx.warnings,
+                            **ctx.result_fields(True, ""),
                         )
+                    ctx.answer()
                 except LspRequestError as exc:
                     ctx.fail(str(exc))
                 except Exception as exc:
+                    logger.debug("Server operation failed", exc_info=True)
                     ctx.fail(f"Server '{spec.name}': {exc}")
 
         return RenameSymbolResult(
-            note=ctx.note(False, f"Could not rename '{symbol}' in {abs_path}"),
-            warnings=ctx.warnings,
+            **ctx.result_fields(False, f"Could not rename '{symbol}' in {abs_path}"),
         )
 
     @with_deadline(HoverResult)
@@ -788,8 +807,7 @@ class Dispatcher:
         servers = await self._acquire_servers(abs_path, ToolKind.GET_HOVER, ctx)
         if not any(e for _, e in servers):
             return HoverResult(
-                note=ctx.note(False, _no_cap_note(abs_path, "hoverProvider")),
-                warnings=ctx.warnings,
+                **ctx.result_fields(False, _no_cap_note(abs_path, "hoverProvider")),
             )
 
         rel = self._rel(abs_path, infer_project_root(abs_path))
@@ -807,9 +825,12 @@ class Dispatcher:
                         raw = await self._req(
                             spec.name,
                             "textDocument/hover",
-                            lambda: server.raw_request("textDocument/hover", params),
+                            lambda server=server: server.raw_request(
+                                "textDocument/hover", params
+                            ),
                         )
                 text = _hover_text(raw)
+                ctx.answer()
                 if text:
                     rng = None
                     r = raw.get("range") if isinstance(raw, dict) else None
@@ -818,20 +839,19 @@ class Dispatcher:
                     return HoverResult(
                         contents=text,
                         range=rng,
-                        note=ctx.note(True, ""),
-                        warnings=ctx.warnings,
+                        **ctx.result_fields(True, ""),
                     )
             except LspRequestError as exc:
                 ctx.fail(str(exc))
             except Exception as exc:
+                logger.debug("Server operation failed", exc_info=True)
                 ctx.fail(f"Server '{spec.name}': {exc}")
 
         return HoverResult(
-            note=ctx.note(
+            **ctx.result_fields(
                 False,
                 f"No hover information at {abs_path}:{line}:{character} (0-based)",
             ),
-            warnings=ctx.warnings,
         )
 
     @with_deadline(CallHierarchyResult)
@@ -859,8 +879,9 @@ class Dispatcher:
         if not any(e for _, e in servers):
             return CallHierarchyResult(
                 direction=direction,
-                note=ctx.note(False, _no_cap_note(abs_path, "callHierarchyProvider")),
-                warnings=ctx.warnings,
+                **ctx.result_fields(
+                    False, _no_cap_note(abs_path, "callHierarchyProvider")
+                ),
             )
 
         rel = self._rel(abs_path, infer_project_root(abs_path))
@@ -881,11 +902,12 @@ class Dispatcher:
                         prepared = await self._req(
                             spec.name,
                             "textDocument/prepareCallHierarchy",
-                            lambda: server.raw_request(
+                            lambda server=server: server.raw_request(
                                 "textDocument/prepareCallHierarchy", params
                             ),
                         )
                         if not prepared:
+                            ctx.answer()
                             continue
                         roots = [_call_item(i) for i in prepared if isinstance(i, dict)]
                         edges: list[CallEdge] = []
@@ -897,7 +919,7 @@ class Dispatcher:
                                 raw = await self._req(
                                     spec.name,
                                     method,
-                                    lambda item=item: server.raw_request(
+                                    lambda item=item, server=server: server.raw_request(
                                         method, {"item": item}
                                     ),
                                 )
@@ -924,25 +946,25 @@ class Dispatcher:
                                 )
                         if answered == 0:
                             continue  # every item failed: recorded in ctx
+                        ctx.answer()
                 return CallHierarchyResult(
                     roots=roots,
                     direction=direction,
                     calls=edges,
-                    note=ctx.note(True, ""),
-                    warnings=ctx.warnings,
+                    **ctx.result_fields(True, ""),
                 )
             except LspRequestError as exc:
                 ctx.fail(str(exc))
             except Exception as exc:
+                logger.debug("Server operation failed", exc_info=True)
                 ctx.fail(f"Server '{spec.name}': {exc}")
 
         return CallHierarchyResult(
             direction=direction,
-            note=ctx.note(
+            **ctx.result_fields(
                 False,
                 f"No callable symbol at {abs_path}:{line}:{character} (0-based)",
             ),
-            warnings=ctx.warnings,
         )
 
     @with_deadline(DiagnosticsResult)
@@ -983,7 +1005,7 @@ class Dispatcher:
                             raw = await self._req(
                                 spec.name,
                                 "textDocument/diagnostic",
-                                lambda: server.raw_request(
+                                lambda server=server: server.raw_request(
                                     "textDocument/diagnostic",
                                     {"textDocument": {"uri": uri}},
                                 ),
@@ -997,6 +1019,7 @@ class Dispatcher:
                                 )
                             else:
                                 diags = items
+                                ctx.answer()
                         else:
                             # Push path: wait for textDocument/publishDiagnostics
                             await server.wait_for_diagnostics(
@@ -1006,6 +1029,7 @@ class Dispatcher:
                             )
                             if uri in server.push_diagnostics:
                                 diags = server.push_diagnostics[uri]
+                                ctx.answer()
                             else:
                                 ctx.hint(
                                     f"Server '{spec.name}' published no diagnostics "
@@ -1016,6 +1040,7 @@ class Dispatcher:
                 ctx.fail(str(exc))
                 continue
             except Exception as exc:
+                logger.debug("Server operation failed", exc_info=True)
                 ctx.fail(f"Server '{spec.name}': {exc}")
                 continue
 
@@ -1046,14 +1071,13 @@ class Dispatcher:
                     )
                 )
 
-        note = ctx.note(bool(all_diags), "")
-        if all_diags and ctx.hints and not note:
+        result_fields = ctx.result_fields(bool(all_diags), "")
+        if all_diags and ctx.hints and not result_fields["note"]:
             # Some server may have more to say: don't let partial look complete.
-            note = "Partial result — " + " ".join(ctx.hints)
+            result_fields["note"] = "Partial result - " + " ".join(ctx.hints)
         return DiagnosticsResult(
             diagnostics=all_diags,
-            note=note,
-            warnings=ctx.warnings,
+            **result_fields,
         )
 
 
@@ -1350,6 +1374,7 @@ def _parse_locations(raw: Any, repo_root: str) -> list[Location]:
                 else uri
             )
         except Exception:
+            logger.debug("Location URI conversion failed", exc_info=True)
             abs_path = uri
         locs.append(
             Location(
