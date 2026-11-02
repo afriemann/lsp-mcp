@@ -14,7 +14,6 @@ from lsp_mcp.dispatch.router import Dispatcher
 from lsp_mcp.lsp.capabilities import CapabilitySet
 from lsp_mcp.lsp.manager import ServerEntry, ServerManager
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -154,7 +153,8 @@ async def test_get_symbols_overview_no_capable_server(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_symbols_overview_partial_failure(tmp_path: Path) -> None:
+async def test_one_of_two_servers_fails_to_start(tmp_path: Path) -> None:
+    # spec: openspec/specs/mcp-tools/spec.md
     f = tmp_path / "app.py"
     f.touch()
 
@@ -474,7 +474,7 @@ async def test_get_symbols_overview_fallthrough_to_second(tmp_path: Path) -> Non
 
 # ---------------------------------------------------------------------------
 # Tests: replace_symbol_body — decorator preservation
-# spec: openspec/changes/fix-decorator-preservation-and-tool-descriptions/specs/mcp-tools/spec.md
+# spec: openspec/specs/mcp-tools/spec.md
 # ---------------------------------------------------------------------------
 
 
@@ -651,7 +651,7 @@ async def test_replace_symbol_body_replaces_decorator_when_new_body_starts_with_
 
 # ---------------------------------------------------------------------------
 # Tests: replace_symbol_body — symbol not found
-# spec: openspec/changes/fix-decorator-preservation-and-tool-descriptions/specs/mcp-tools/spec.md
+# spec: openspec/specs/mcp-tools/spec.md
 # ---------------------------------------------------------------------------
 
 

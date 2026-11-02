@@ -6,18 +6,18 @@ import asyncio
 import logging
 import os
 import pathlib
-import shlex
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import PurePath
-from typing import Any, AsyncIterator, Iterator
+from typing import Any
 
 from multilspy.language_server import LanguageServer, LSPFileBuffer
 from multilspy.lsp_protocol_handler.lsp_constants import LSPConstants
-from multilspy.multilspy_exceptions import MultilspyException
-from multilspy.multilspy_utils import FileUtils
 from multilspy.lsp_protocol_handler.server import ProcessLaunchInfo
 from multilspy.multilspy_config import MultilspyConfig
+from multilspy.multilspy_exceptions import MultilspyException
 from multilspy.multilspy_logger import MultilspyLogger
+from multilspy.multilspy_utils import FileUtils
 
 from .capabilities import CapabilitySet
 
@@ -131,18 +131,13 @@ class GenericLanguageServer(LanguageServer):
             raise ValueError("command must not be empty")
 
         _logger = logger or MultilspyLogger()
-        # multilspy's ProcessLaunchInfo.cmd is a string passed to
-        # create_subprocess_shell.  We mitigate injection risk with shlex.join,
-        # but shell variable expansion and aliases remain active.  See STYLE.md
-        # "Known multilspy limitation: shell-based process launch".
-        cmd_str = shlex.join(command)
         config = MultilspyConfig(code_language="python")  # value unused in generic path
         super().__init__(
             config=config,
             logger=_logger,
             repository_root_path=repository_root_path,
             process_launch_info=ProcessLaunchInfo(
-                cmd=cmd_str, cwd=repository_root_path
+                cmd=list(command), cwd=repository_root_path
             ),
             language_id=language_id,
         )
@@ -221,7 +216,7 @@ class GenericLanguageServer(LanguageServer):
         return await self.server.send_request(method, params)
 
     @asynccontextmanager
-    async def start_server(self) -> AsyncIterator["GenericLanguageServer"]:
+    async def start_server(self) -> AsyncIterator[GenericLanguageServer]:
         """Start the language server process and complete the initialize handshake.
 
         Implementation note: ``LanguageServer.start_server()`` (the multilspy base)
@@ -267,14 +262,16 @@ class GenericLanguageServer(LanguageServer):
                 try:
                     await self.server.shutdown()
                 except Exception:
-                    pass  # best-effort shutdown
+                    logger.debug("Language server shutdown failed", exc_info=True)
             finally:
                 # Always reap the subprocess — on normal exit, initialize
                 # failure, and cancellation (e.g. a start timeout) alike.
                 try:
                     await self.server.stop()
                 except Exception as exc:
-                    logger.debug("Error stopping language server: %s", exc)
+                    logger.debug(
+                        "Error stopping language server: %s", exc, exc_info=True
+                    )
 
     async def _initialize(self) -> None:
         """Run the LSP initialize handshake and capture capabilities."""

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from lsp_mcp.lsp.capabilities import CapabilitySet, ToolKind
+from lsp_mcp.lsp.capabilities import ToolKind
 from lsp_mcp.lsp.generic_server import GenericLanguageServer
 
 
@@ -193,7 +192,8 @@ async def test_initialization_options_on_the_wire(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_process_stopped_on_normal_exit(tmp_path):
+# spec: openspec/specs/lsp-lifecycle/spec.md
+async def test_async_variant_used(tmp_path):
     handler = _make_mock_server_handler({"capabilities": {}})
     handler.stop = AsyncMock()
     with _patched(handler):
@@ -201,8 +201,28 @@ async def test_process_stopped_on_normal_exit(tmp_path):
             command=["x"], repository_root_path=str(tmp_path)
         )
         async with server.start_server():
+            handler.start.assert_awaited_once()
+            handler.send.initialize.assert_awaited_once()
             handler.stop.assert_not_called()
     handler.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["tsc", "--lsp", "--stdio"],
+        ["/bin/server name", "two words", "a'b", 'a"b', "$HOME;echo *"],
+    ],
+)
+def test_server_launched_from_configured_command(tmp_path, command):
+    # spec: openspec/specs/lsp-lifecycle/spec.md
+    handler = _make_mock_server_handler({"capabilities": {}})
+    with _patched(handler) as constructor:
+        GenericLanguageServer(command=command, repository_root_path=str(tmp_path))
+    launch = constructor.call_args.args[0]
+    assert launch.cmd == command
+    command.append("caller mutation")
+    assert launch.cmd != command
 
 
 @pytest.mark.asyncio

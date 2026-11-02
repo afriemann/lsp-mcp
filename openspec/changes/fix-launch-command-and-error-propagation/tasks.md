@@ -1,0 +1,5 @@
+- [x] 1. Reproduce and fix "Server launched from configured command", retain "Async variant used", and correct STYLE launch guidance per design Launch.
+- [x] 2. Reproduce "Server failed to start", "Retries exhausted" and "Total execution failure across tools" at the MCP boundary; implement design Classification and Transport boundary.
+- [x] 3. Verify "One of two servers fails to start", "Successful empty answer alongside failure", "Successful empty and informational responses" and "No push diagnostics published"; preserve payload compatibility per design Classification.
+- [x] 4. Align README and STYLE error/adapter guidance with the protocol contract and verify against the implementation.
+- [x] 5. Run the full suite and available quality checks; review the frozen diff against proposal, deltas and design and resolve findings.
