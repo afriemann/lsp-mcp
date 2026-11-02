@@ -1,16 +1,16 @@
 # lsp-lifecycle Specification
 
 ## Purpose
-TBD - created by archiving change initial-design. Update Purpose after archive.
+Define configured language-server startup, capability discovery, and lifecycle recovery.
 
 ## Requirements
 
 ### Requirement: Launch LSP server processes from configured command
-The system SHALL launch each LSP server as a subprocess using the `command` list from the server's configuration entry, with no modification to that list. The system SHALL use `AsyncLanguageServer` (not `SyncLanguageServer`) as the multilspy base to avoid the known deadlock in issue #124.
+The system SHALL launch each LSP server as a subprocess using the `command` list from the server's configuration entry, with no modification to its argument values, boundaries or order, including spaces, quotes and shell metacharacters. The system SHALL use `AsyncLanguageServer` (not `SyncLanguageServer`) as the multilspy base to avoid the known deadlock in issue #124.
 
 #### Scenario: Server launched from configured command
-- **WHEN** a tool call requires a server named `ty` with `command: [uvx, ty, server]`
-- **THEN** the system spawns the process `uvx ty server` as a direct subprocess (not via shell)
+- **WHEN** a tool call requires a server with a configured executable and argument list
+- **THEN** the system launches that executable directly with each argument intact, without shell interpretation or character splitting
 
 #### Scenario: Async variant used
 - **WHEN** the server process is started

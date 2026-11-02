@@ -1,6 +1,6 @@
 """languageId in didOpen, and pull-diagnostics responses that must not read as clean."""
 
-# spec: openspec/changes/fix-python-diagnostics-false-clean/specs/lsp-lifecycle/spec.md
+# spec: openspec/specs/lsp-lifecycle/spec.md
 
 from __future__ import annotations
 
