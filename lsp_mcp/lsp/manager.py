@@ -53,6 +53,16 @@ def infer_project_root(file_path: str) -> str:
 PoolKey = tuple[str, str]  # (server_name, abs_project_root)
 
 
+@dataclass(frozen=True)
+class _StartupFailure:
+    failed_at: float
+    reason: str
+    attempt: int
+    last_stage: str
+    outcome: str
+    elapsed: float
+
+
 @dataclass
 class ServerEntry:
     server: GenericLanguageServer
@@ -81,8 +91,7 @@ class ServerManager:
     ) -> None:
         self._start_timeout = start_timeout
         self._failure_cooldown = failure_cooldown
-        # key -> (monotonic time of failure, human-readable reason)
-        self._failures: dict[PoolKey, tuple[float, str]] = {}
+        self._failures: dict[PoolKey, _StartupFailure] = {}
         self._pool: dict[PoolKey, ServerEntry] = {}
         self._pool_lock = asyncio.Lock()
         self._key_locks: dict[PoolKey, asyncio.Lock] = {}
@@ -127,7 +136,17 @@ class ServerManager:
 
             failed = self._failures.get(key)
             if failed is not None:
-                if time.monotonic() - failed[0] < self._failure_cooldown:
+                if time.monotonic() - failed.failed_at < self._failure_cooldown:
+                    logger.info(
+                        "server=%r root=%r attempt=%s last_stage=%s outcome=%s elapsed=%.3fs cooldown remaining=%.3fs retry=no",
+                        spec.name,
+                        root,
+                        failed.attempt,
+                        failed.last_stage,
+                        failed.outcome,
+                        failed.elapsed,
+                        self._failure_cooldown - (time.monotonic() - failed.failed_at),
+                    )
                     return None
                 del self._failures[key]
 
@@ -137,7 +156,7 @@ class ServerManager:
     def failure_reason(self, server_name: str, file_path: str) -> str | None:
         """Why the last start of *server_name* for *file_path*'s root failed, if it did."""
         failed = self._failures.get((server_name, infer_project_root(file_path)))
-        return failed[1] if failed else None
+        return failed.reason if failed else None
 
     async def aclose(self) -> None:
         """Gracefully close all pool entries and stop the eviction sweep."""
@@ -171,6 +190,15 @@ class ServerManager:
         self, spec: ServerSpec, root: str, key: PoolKey, *, retry: bool = True
     ) -> ServerEntry | None:
         """Start a new server process for *key*. Retries once on failure."""
+        begun = time.monotonic()
+        attempt = 1 if retry else 2
+        logger.info(
+            "server=%r root=%r attempt=%s startup_begin timeout=%.3fs",
+            spec.name,
+            root,
+            attempt,
+            self._start_timeout,
+        )
         # Remove any stale failed entry
         old = self._pool.pop(key, None)
         if old is not None:
@@ -181,6 +209,8 @@ class ServerManager:
             command=list(spec.command),
             repository_root_path=root,
             initialization_options=spec.initialization_options,
+            server_name=spec.name,
+            startup_attempt=attempt,
         )
         entry = ServerEntry(
             server=server,
@@ -197,10 +227,26 @@ class ServerManager:
                 await exit_stack.enter_async_context(server.start_server())
             entry.state = "ready"
             self._failures.pop(key, None)
-            logger.info("Started LSP server %r for root %r", spec.name, root)
+            logger.info(
+                "server=%r root=%r attempt=%s outcome=ready elapsed=%.3fs",
+                spec.name,
+                root,
+                attempt,
+                time.monotonic() - begun,
+            )
             self._ensure_eviction_running()
             await self._enforce_cap()
             return entry
+        except asyncio.CancelledError:
+            logger.info(
+                "server=%r root=%r attempt=%s outcome=cancelled elapsed=%.3fs retry=no last_stage=%s",
+                spec.name,
+                root,
+                attempt,
+                time.monotonic() - begun,
+                server.last_stage,
+            )
+            raise
         except Exception as exc:
             # Only *our* deadline counts as a start timeout; a TimeoutError
             # raised from inside the server start is an ordinary failure.
@@ -212,14 +258,28 @@ class ServerManager:
             )
             reason = detail  # no command line: it may hold credentials
             logger.warning(
-                "Failed to start LSP server %r (command %r): %s",
-                spec.name, list(spec.command), reason,
-            )  # fmt: skip
+                "server=%r root=%r attempt=%s outcome=%s elapsed=%.3fs retry=%s last_stage=%s: %s",
+                spec.name,
+                root,
+                attempt,
+                "deadline" if timed_out else "error",
+                time.monotonic() - begun,
+                "yes" if retry and not timed_out else "no",
+                server.last_stage,
+                reason,
+            )
+            logger.debug("Startup failure details", exc_info=True)
             self._pool.pop(key, None)
             await self._close_entry(entry)
-            self._failures[key] = (time.monotonic(), reason)
+            self._failures[key] = _StartupFailure(
+                failed_at=time.monotonic(),
+                reason=reason,
+                attempt=attempt,
+                last_stage=server.last_stage,
+                outcome="deadline" if timed_out else "error",
+                elapsed=time.monotonic() - begun,
+            )
             if retry and not timed_out:
-                logger.info("Retrying LSP server %r once", spec.name)
                 return await self._start(spec, root, key, retry=False)
             entry.state = "failed"
             return None
@@ -228,7 +288,7 @@ class ServerManager:
         try:
             await entry.exit_stack.aclose()
         except Exception as exc:
-            logger.debug("Error closing server entry: %s", exc)
+            logger.debug("Error closing server entry: %s", exc, exc_info=True)
 
     async def _evict(self, key: PoolKey) -> None:
         entry = self._pool.pop(key, None)
@@ -254,7 +314,7 @@ class ServerManager:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.debug("Error in eviction loop: %s", exc)
+                logger.debug("Error in eviction loop: %s", exc, exc_info=True)
 
     async def _sweep_idle(self) -> None:
         cutoff = time.monotonic() - self._idle_ttl

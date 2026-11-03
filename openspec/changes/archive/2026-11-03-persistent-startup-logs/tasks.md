@@ -1,0 +1,4 @@
+- [x] 1. Implement "Persists and rotates private diagnostics" and "Rejects unsafe log destinations" with CLI tests and README guidance.
+- [x] 2. Implement "Coordinates simultaneous writers" and "Persistence failure falls back to stderr" using the design's coordinated fallback.
+- [x] 3. Implement "Records successful startup stages" and "Records failed startup attempts" with manager and generic-server tests.
+- [x] 4. Implement "Captures stderr without protocol payloads" and "Captures language-server log messages" with generic-server tests and README capture limits.

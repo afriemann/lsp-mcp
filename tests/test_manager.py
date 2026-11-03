@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from lsp_mcp.config.model import ServerSpec
 from lsp_mcp.lsp.manager import ServerManager, infer_project_root
-
 
 # ---------------------------------------------------------------------------
 # infer_project_root
@@ -333,7 +333,7 @@ async def test_inner_timeout_during_start_not_labelled_as_start_timeout(
 
     @asynccontextmanager
     async def _inner():
-        raise asyncio.TimeoutError("inner")
+        raise TimeoutError("inner")
         yield server
 
     server.start_server = _inner
@@ -341,3 +341,69 @@ async def test_inner_timeout_during_start_not_labelled_as_start_timeout(
     with patch("lsp_mcp.lsp.manager.GenericLanguageServer", return_value=server):
         assert await manager.acquire(_make_spec(), str(f)) is None
     assert "timed out after 30s" not in manager.failure_reason("ty", str(f))
+
+
+# spec: openspec/specs/lsp-lifecycle/spec.md
+@pytest.mark.parametrize(
+    "failure", ["error", "deadline", "cancellation", "inner_timeout"]
+)
+async def test_records_failed_startup_attempts(tmp_path, caplog, failure):
+    f = tmp_path / "app.py"
+    f.touch()
+    server = _mock_server(str(tmp_path))
+
+    @asynccontextmanager
+    async def fail():
+        server.last_stage = "initialize_begin"
+        if failure == "deadline":
+            await asyncio.Event().wait()
+        elif failure == "cancellation":
+            raise asyncio.CancelledError()
+        elif failure == "inner_timeout":
+            raise TimeoutError("inner")
+        else:
+            raise RuntimeError("installation missing")
+        yield server
+
+    server.start_server = fail
+    manager = ServerManager(start_timeout=0.01)
+    with (
+        caplog.at_level(logging.INFO),
+        patch("lsp_mcp.lsp.manager.GenericLanguageServer", return_value=server),
+    ):
+        if failure == "cancellation":
+            with pytest.raises(asyncio.CancelledError):
+                await manager.acquire(_make_spec(), str(f))
+        else:
+            assert await manager.acquire(_make_spec(), str(f)) is None
+            assert await manager.acquire(_make_spec(), str(f)) is None
+            assert "cooldown" in caplog.text
+            cooldown = [
+                record.getMessage()
+                for record in caplog.records
+                if "cooldown" in record.getMessage()
+            ]
+            assert len(cooldown) == 1
+            assert "last_stage=initialize_begin" in cooldown[0]
+            assert "elapsed=" in cooldown[0]
+            assert f"attempt={1 if failure == 'deadline' else 2}" in cooldown[0]
+            assert (
+                f"outcome={'deadline' if failure == 'deadline' else 'error'}"
+                in cooldown[0]
+            )
+        await manager.aclose()
+    classification = {
+        "error": "error",
+        "deadline": "deadline",
+        "cancellation": "cancelled",
+        "inner_timeout": "error",
+    }[failure]
+    assert f"outcome={classification}" in caplog.text
+    assert "last_stage=initialize_begin" in caplog.text
+    assert "attempt=1" in caplog.text
+    assert "elapsed=" in caplog.text
+    assert "server='ty'" in caplog.text
+    assert str(tmp_path) in caplog.text
+    assert "command" not in caplog.text
+    if failure in {"error", "inner_timeout"}:
+        assert "attempt=2" in caplog.text and "retry=yes" in caplog.text
