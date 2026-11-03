@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import pathlib
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import PurePath
@@ -126,6 +127,8 @@ class GenericLanguageServer(LanguageServer):
         logger: MultilspyLogger | None = None,
         language_id: str = "plaintext",
         initialization_options: dict[str, Any] | None = None,
+        server_name: str = "generic",
+        startup_attempt: int = 1,
     ) -> None:
         if not command:
             raise ValueError("command must not be empty")
@@ -141,12 +144,44 @@ class GenericLanguageServer(LanguageServer):
             ),
             language_id=language_id,
         )
-        self._command = command
+        self._server_name = server_name
+        self._startup_attempt = startup_attempt
+        self.last_stage = "created"
+        self._startup_begin = time.monotonic()
+        self.server.logger = self._on_transport_log
         self._initialization_options = initialization_options
         self._capabilities: CapabilitySet = CapabilitySet({})
         # per-URI push diagnostics cache: uri -> list[dict]
         self._push_diagnostics: dict[str, list[dict[str, Any]]] = {}
         self._diag_event: dict[str, asyncio.Event] = {}
+
+    def _on_transport_log(self, source: str, target: str, message: Any) -> None:
+        if (
+            source == "client"
+            and target == "logger"
+            and isinstance(message, str)
+            and message.startswith("LSP stderr: ")
+        ):
+            self._diagnostic(logging.INFO, "%s", message.rstrip())
+
+    def _diagnostic(self, level: int, message: str, *args: Any) -> None:
+        logger.log(
+            level,
+            "server=%r root=%r attempt=%s " + message,
+            self._server_name,
+            self.repository_root_path,
+            self._startup_attempt,
+            *args,
+        )
+
+    def _stage(self, stage: str) -> None:
+        self.last_stage = stage
+        self._diagnostic(
+            logging.INFO,
+            "stage=%s elapsed=%.3fs",
+            stage,
+            time.monotonic() - self._startup_begin,
+        )
 
     @property
     def capabilities(self) -> CapabilitySet:
@@ -246,18 +281,30 @@ class GenericLanguageServer(LanguageServer):
         async def _noop(params: Any) -> None:
             pass
 
+        async def _on_log_message(params: dict[str, Any]) -> None:
+            level = {1: logging.ERROR, 2: logging.WARNING}.get(
+                params.get("type"), logging.INFO
+            )
+            self._diagnostic(level, "window/logMessage: %s", params.get("message", ""))
+
         self.server.on_notification(
             "textDocument/publishDiagnostics", _on_publish_diagnostics
         )
-        self.server.on_notification("window/logMessage", _noop)
+        self.server.on_notification("window/logMessage", _on_log_message)
         self.server.on_notification("$/progress", _noop)
         self.server.on_notification("window/showMessage", _noop)
         self.server.on_request("client/registerCapability", lambda p: None)
 
         async with super().start_server():
             try:
+                self._startup_begin = time.monotonic()
+                self._stage("process_launch_begin")
                 await self.server.start()
+                self._stage("process_launch_complete")
+                self._stage("initialize_begin")
                 await self._initialize()
+                self._stage("initialize_complete")
+                self._stage("ready")
                 yield self
                 try:
                     await self.server.shutdown()
@@ -295,11 +342,7 @@ class GenericLanguageServer(LanguageServer):
         try:
             init_response = await self.server.send.initialize(initialize_params)
         except Exception as exc:
-            # The command line is deliberately NOT included: it can carry
-            # credentials and this message reaches the agent.  Log it instead.
-            logger.warning(
-                "LSP initialize failed for command %r: %s", self._command, exc
-            )
+            self._diagnostic(logging.WARNING, "initialize failed: %s", exc)
             raise RuntimeError(f"LSP initialize failed: {exc}") from exc
 
         raw_caps = {}

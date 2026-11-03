@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -173,6 +174,83 @@ def _patched(handler):
     return patch(
         "multilspy.language_server.LanguageServerHandler", return_value=handler
     )
+
+
+# spec: openspec/specs/lsp-lifecycle/spec.md
+async def test_records_successful_startup_stages(tmp_path, caplog):
+    handler = _make_mock_server_handler({"capabilities": {}})
+    with caplog.at_level(logging.INFO), _patched(handler):
+        server = GenericLanguageServer(
+            command=["x", "private-argument"],
+            repository_root_path=str(tmp_path),
+            startup_attempt=2,
+        )
+        async with server.start_server():
+            pass
+    stages = [record.getMessage() for record in caplog.records]
+    for stage in [
+        "process_launch_begin",
+        "process_launch_complete",
+        "initialize_begin",
+        "initialize_complete",
+        "ready",
+    ]:
+        assert any(f"stage={stage} " in message for message in stages), stage
+    assert all("attempt=2" in message for message in stages)
+    assert str(tmp_path) in caplog.text
+    assert "private-argument" not in caplog.text
+
+
+# spec: openspec/specs/lsp-lifecycle/spec.md
+def test_captures_stderr_without_protocol_payloads(tmp_path, caplog):
+    server = GenericLanguageServer(command=["x"], repository_root_path=str(tmp_path))
+    with caplog.at_level(logging.DEBUG):
+        # multilspy's _log emits this exact source/target pair for stderr.
+        server.server._log(
+            "LSP stderr: missing TypeScript installation 100% done %s %d"
+        )
+        server.server.logger("server", "client", {"text": "PROTOCOL_DOCUMENT_SENTINEL"})
+        server.server.logger(
+            "client", "server", {"initializationOptions": "private options"}
+        )
+        server.server.logger("server", "client", "LSP stderr: private protocol")
+    assert "missing TypeScript installation" in caplog.text
+    assert str(tmp_path) in caplog.text
+    assert "100% done %s %d" in caplog.text
+    assert "PROTOCOL_DOCUMENT_SENTINEL" not in caplog.text
+    assert "private options" not in caplog.text
+    assert "private protocol" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "message_type,level",
+    [(1, logging.ERROR), (2, logging.WARNING), (3, logging.INFO), (4, logging.INFO)],
+)
+# spec: openspec/specs/lsp-lifecycle/spec.md
+async def test_captures_language_server_log_messages(
+    tmp_path, caplog, message_type, level
+):
+    handler = _make_mock_server_handler({"capabilities": {}})
+    callbacks = {}
+    handler.on_notification.side_effect = lambda method, callback: callbacks.update(
+        {method: callback}
+    )
+    with caplog.at_level(logging.INFO), _patched(handler):
+        server = GenericLanguageServer(
+            command=["x"], repository_root_path=str(tmp_path)
+        )
+        async with server.start_server():
+            await callbacks["window/logMessage"](
+                {"type": message_type, "message": "server diagnostic"}
+            )
+    records = [
+        record
+        for record in caplog.records
+        if "server diagnostic" in record.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == level
+    assert str(tmp_path) in records[0].getMessage()
 
 
 @pytest.mark.asyncio
